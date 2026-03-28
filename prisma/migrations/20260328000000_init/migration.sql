@@ -1,4 +1,4 @@
-﻿-- CreateTable
+-- CreateTable
 CREATE TABLE "AdminUser" (
     "id" TEXT NOT NULL,
     "username" TEXT NOT NULL,
