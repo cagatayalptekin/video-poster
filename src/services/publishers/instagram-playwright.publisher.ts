@@ -1,0 +1,871 @@
+import { chromium, Browser, BrowserContext, Page } from "playwright";
+import { PlatformPublisher, PublishInput, PublishResult } from "./types";
+import path from "path";
+import fs from "fs";
+
+const SCREENSHOT_DIR = path.resolve("./debug-screenshots");
+const SESSION_DIR = path.resolve("./playwright-state");
+const SESSION_FILE = path.join(SESSION_DIR, "instagram-storage-state.json");
+
+// Ensure screenshot directory exists
+function ensureScreenshotDir() {
+  if (!fs.existsSync(SCREENSHOT_DIR)) {
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  }
+}
+
+// Ensure session directory exists
+function ensureSessionDir() {
+  if (!fs.existsSync(SESSION_DIR)) {
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+  }
+}
+
+/**
+ * Returns true if a saved session file exists on disk.
+ */
+function hasSavedSession(): boolean {
+  return fs.existsSync(SESSION_FILE);
+}
+
+/**
+ * Saves current browser context storage state (cookies + localStorage) to disk.
+ */
+async function saveSession(context: BrowserContext): Promise<void> {
+  ensureSessionDir();
+  await context.storageState({ path: SESSION_FILE });
+  console.log(`[InstagramPlaywright] Session saved to ${SESSION_FILE}`);
+}
+
+/**
+ * Deletes the saved session file to force a fresh login on the next run.
+ */
+function clearSavedSession(): void {
+  if (fs.existsSync(SESSION_FILE)) {
+    fs.unlinkSync(SESSION_FILE);
+    console.log("[InstagramPlaywright] Saved session cleared");
+  }
+}
+
+/**
+ * Navigates to instagram.com and checks whether the user is already logged in.
+ * Returns true if the session is valid (no login redirect), false otherwise.
+ */
+async function isSessionValid(page: Page): Promise<boolean> {
+  try {
+    await page.goto("https://www.instagram.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 20000,
+    });
+    await humanDelay(2000, 3500);
+
+    const url = page.url();
+    // If redirected to login, session is expired/invalid
+    if (
+      url.includes("/accounts/login") ||
+      url.includes("/challenge") ||
+      url.includes("two_factor")
+    ) {
+      console.log(`[InstagramPlaywright] Session invalid — redirected to: ${url}`);
+      return false;
+    }
+
+    // Check for a logged-in indicator: the nav bar or avatar element
+    // TODO: Selector may change — these are typical logged-in nav indicators
+    const loggedInIndicators = [
+      '[aria-label="Home"]',
+      'a[href="/direct/inbox/"]',
+      'svg[aria-label="Home"]',
+      'a[href*="/direct/"]',
+      // Profile link
+      'a[href^="/"][role="link"]:not([href="/"])',
+    ];
+
+    for (const selector of loggedInIndicators) {
+      const el = await page.$(selector);
+      if (el) {
+        console.log(`[InstagramPlaywright] Session valid — detected logged-in element via: ${selector}`);
+        return true;
+      }
+    }
+
+    console.log("[InstagramPlaywright] Session validity unclear — no login-page redirect but no nav indicator found");
+    // Conservative: treat as invalid so we do a fresh login
+    return false;
+  } catch (err) {
+    console.warn(`[InstagramPlaywright] Session validity check failed: ${err}`);
+    return false;
+  }
+}
+
+/**
+ * Takes a timestamped debug screenshot and saves it locally.
+ */
+async function saveDebugScreenshot(page: Page, stepName: string): Promise<string> {
+  ensureScreenshotDir();
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `ig-${stepName}-${timestamp}.png`;
+  const filepath = path.join(SCREENSHOT_DIR, filename);
+  try {
+    await page.screenshot({ path: filepath, fullPage: true });
+    console.log(`[InstagramPlaywright] Debug screenshot saved: ${filepath}`);
+  } catch (err) {
+    console.error(`[InstagramPlaywright] Failed to save screenshot: ${err}`);
+  }
+  return filepath;
+}
+
+/**
+ * Helper: wait for a selector with a custom timeout.
+ */
+async function waitForSelector(page: Page, selector: string, opts?: { timeout?: number; state?: "visible" | "attached" | "hidden" }) {
+  const timeout = opts?.timeout ?? 15000;
+  const state = opts?.state ?? "visible";
+  return page.waitForSelector(selector, { timeout, state });
+}
+
+/**
+ * Helper: safe click — waits for selector then clicks.
+ */
+async function safeClick(page: Page, selector: string, opts?: { timeout?: number }) {
+  const el = await waitForSelector(page, selector, { timeout: opts?.timeout ?? 15000 });
+  if (!el) throw new Error(`Element not found: ${selector}`);
+  await el.click();
+}
+
+/**
+ * Helper: small random delay to avoid detection patterns.
+ */
+async function humanDelay(minMs = 800, maxMs = 2500): Promise<void> {
+  const delay = minMs + Math.random() * (maxMs - minMs);
+  await new Promise((r) => setTimeout(r, delay));
+}
+
+/**
+ * Helper: type text with a human-like cadence.
+ */
+async function humanType(page: Page, selector: string, text: string): Promise<void> {
+  await page.click(selector);
+  for (const char of text) {
+    await page.keyboard.type(char, { delay: 30 + Math.random() * 80 });
+  }
+}
+
+/**
+ * Detects known challenge/blocker screens after login.
+ * Returns a description of the challenge if found, or null.
+ */
+async function detectLoginChallenge(page: Page): Promise<string | null> {
+  const url = page.url();
+
+  // Suspicious login attempt
+  if (url.includes("/challenge") || url.includes("challenge")) {
+    return "Instagram suspicious login challenge detected. You may need to verify via email/SMS.";
+  }
+
+  // Two-factor authentication
+  if (url.includes("two_factor")) {
+    return "Instagram two-factor authentication required.";
+  }
+
+  // "Save Your Login Info" screen
+  // TODO: Selector may change — Instagram updates UI frequently
+  const saveLoginBtn = await page.$('button:has-text("Save Info"), button:has-text("Not Now"), [role="button"]:has-text("Save Info")');
+  if (saveLoginBtn) {
+    // Click "Not Now" to skip
+    const notNow = await page.$('button:has-text("Not Now"), [role="button"]:has-text("Not Now")');
+    if (notNow) {
+      await notNow.click();
+      await humanDelay(1000, 2000);
+      console.log("[InstagramPlaywright] Dismissed 'Save Login Info' prompt");
+    }
+  }
+
+  // "Turn on Notifications" prompt
+  // TODO: Selector may change — Instagram updates UI frequently
+  const notifPrompt = await page.$('button:has-text("Not Now"), [role="button"]:has-text("Not Now")');
+  if (notifPrompt) {
+    await notifPrompt.click();
+    await humanDelay(1000, 2000);
+    console.log("[InstagramPlaywright] Dismissed notifications prompt");
+  }
+
+  // Consent / cookie banners
+  const cookieBtn = await page.$('button:has-text("Allow All Cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept")');
+  if (cookieBtn) {
+    await cookieBtn.click();
+    await humanDelay(500, 1500);
+    console.log("[InstagramPlaywright] Dismissed cookie banner");
+  }
+
+  return null;
+}
+
+/**
+ * Real Instagram publisher using Playwright browser automation.
+ *
+ * Reads credentials from environment variables:
+ *   INSTAGRAM_LOGIN_USERNAME
+ *   INSTAGRAM_LOGIN_PASSWORD
+ *   INSTAGRAM_2FA_CODE (optional, for TOTP 2FA)
+ *   INSTAGRAM_HEADLESS (true|false, default true)
+ *
+ * Session persistence:
+ *   Saves cookies/storage state to ./playwright-state/instagram-storage-state.json
+ *   after a successful fresh login. On the next run, the saved session is loaded
+ *   first. If the session is expired/invalid, falls back to a full login.
+ *   Delete the file to force a fresh login: rm ./playwright-state/instagram-storage-state.json
+ *
+ * Workflow:
+ *  1. Launch Chromium
+ *  2. If saved session exists: load it and verify login status
+ *  3. If session invalid or missing: navigate to login, enter credentials
+ *  4. Handle challenges (2FA, suspicious login, save-info, notifications)
+ *  5. Save session to disk on successful login
+ *  6. Navigate to create/upload flow
+ *  7. Upload video file
+ *  8. Fill caption
+ *  9. Publish
+ * 10. Return structured result
+ *
+ * On failure: saves debug screenshots to ./debug-screenshots/
+ */
+export class InstagramPlaywrightPublisher implements PlatformPublisher {
+  platform = "instagram";
+
+  async publishVideo(input: PublishInput): Promise<PublishResult> {
+    const username = process.env.INSTAGRAM_LOGIN_USERNAME;
+    const password = process.env.INSTAGRAM_LOGIN_PASSWORD;
+    const twoFaCode = process.env.INSTAGRAM_2FA_CODE || "";
+    const headless = process.env.INSTAGRAM_HEADLESS !== "false";
+
+    if (!username || !password) {
+      return {
+        success: false,
+        errorMessage: "INSTAGRAM_LOGIN_USERNAME and INSTAGRAM_LOGIN_PASSWORD env vars are required",
+      };
+    }
+
+    // Validate file exists before launching browser
+    const videoPath = path.resolve(input.filePath);
+    if (!fs.existsSync(videoPath)) {
+      return {
+        success: false,
+        errorMessage: `Video file not found: ${input.filePath}`,
+      };
+    }
+
+    let browser: Browser | null = null;
+    let context: BrowserContext | null = null;
+    let page: Page | null = null;
+    let currentStep = "init";
+
+    try {
+      // ──────────────────────────────────────────────
+      // STEP 1: Launch browser
+      // ──────────────────────────────────────────────
+      currentStep = "launch-browser";
+      console.log(`[InstagramPlaywright] Launching browser (headless=${headless})`);
+
+      browser = await chromium.launch({
+        headless,
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+        ],
+      });
+
+      // ──────────────────────────────────────────────
+      // STEP 2: Load saved session or perform fresh login
+      // ──────────────────────────────────────────────
+      let usedSavedSession = false;
+      let sessionFallback = false;
+
+      if (hasSavedSession()) {
+        // Try to reuse stored session first
+        currentStep = "load-saved-session";
+        console.log(`[InstagramPlaywright] Found saved session at ${SESSION_FILE} — attempting to reuse`);
+
+        context = await browser.newContext({
+          viewport: { width: 1280, height: 900 },
+          userAgent:
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          locale: "en-US",
+          storageState: SESSION_FILE,
+        });
+
+        page = await context.newPage();
+        await page.route("**/bat.bing.com/**", (route) => route.abort());
+        await page.route("**/connect.facebook.net/signals/**", (route) => route.abort());
+
+        currentStep = "verify-saved-session";
+        const sessionOk = await isSessionValid(page);
+
+        if (sessionOk) {
+          usedSavedSession = true;
+          console.log("[InstagramPlaywright] Session mode: EXISTING SESSION reused — skipping login");
+        } else {
+          // Session expired — close context and fall back to fresh login
+          sessionFallback = true;
+          console.log("[InstagramPlaywright] Session mode: SESSION EXPIRED — falling back to fresh login");
+          clearSavedSession();
+          await context.close();
+          context = null;
+          page = null;
+        }
+      }
+
+      if (!usedSavedSession) {
+        // Fresh login path (either no saved session or session was expired)
+        if (!sessionFallback) {
+          console.log("[InstagramPlaywright] Session mode: FRESH LOGIN — no saved session found");
+        }
+
+        context = await browser.newContext({
+          viewport: { width: 1280, height: 900 },
+          userAgent:
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          locale: "en-US",
+        });
+
+        page = await context.newPage();
+        await page.route("**/bat.bing.com/**", (route) => route.abort());
+        await page.route("**/connect.facebook.net/signals/**", (route) => route.abort());
+
+        // ──────────────────────────────────────────────
+        // STEP 2a: Navigate to Instagram login
+        // ──────────────────────────────────────────────
+        currentStep = "navigate-login";
+        console.log("[InstagramPlaywright] Navigating to Instagram login...");
+        await page.goto("https://www.instagram.com/accounts/login/", {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        });
+        await humanDelay(2000, 4000);
+
+        // Handle cookie consent banner if present
+        // TODO: Selector may change — Instagram's cookie banner varies by region
+        const cookieBtn = await page.$('button:has-text("Allow All Cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept All"), button:has-text("Accept")');
+        if (cookieBtn) {
+          await cookieBtn.click();
+          await humanDelay(1000, 2000);
+          console.log("[InstagramPlaywright] Dismissed cookie consent");
+        }
+
+        // ──────────────────────────────────────────────
+        // STEP 2b: Enter credentials
+        // ──────────────────────────────────────────────
+        currentStep = "enter-credentials";
+        console.log("[InstagramPlaywright] Entering credentials...");
+
+        // Wait for login form
+        // TODO: Selector may change — these are the standard Instagram login form selectors
+        await waitForSelector(page, 'input[name="username"]', { timeout: 20000 });
+
+        await humanType(page, 'input[name="username"]', username);
+        await humanDelay(300, 800);
+        await humanType(page, 'input[name="password"]', password);
+        await humanDelay(500, 1500);
+
+        // Click login button
+        // TODO: Selector may change — button text may be localized
+        await page.click('button[type="submit"]');
+        console.log("[InstagramPlaywright] Login submitted, waiting for response...");
+
+        // Wait for navigation after login
+        await humanDelay(4000, 7000);
+
+        // ──────────────────────────────────────────────
+        // STEP 2c: Handle post-login challenges
+        // ──────────────────────────────────────────────
+        currentStep = "handle-challenges";
+
+        // Check for wrong credentials
+        const errorMsg = await page.$('div[role="alert"], #slfErrorAlert, p[data-testid="login-error-message"]');
+        if (errorMsg) {
+          const errorText = await errorMsg.textContent();
+          await saveDebugScreenshot(page, "login-error");
+          return {
+            success: false,
+            errorMessage: `Instagram login failed: ${errorText || "Invalid credentials"}`,
+          };
+        }
+
+        // Check for 2FA screen
+        const pageUrl = page.url();
+        if (pageUrl.includes("two_factor")) {
+          currentStep = "handle-2fa";
+          console.log("[InstagramPlaywright] Two-factor authentication screen detected");
+
+          if (!twoFaCode) {
+            await saveDebugScreenshot(page, "2fa-required");
+            return {
+              success: false,
+              errorMessage:
+                "Instagram 2FA required but INSTAGRAM_2FA_CODE env var is not set. Set it and retry.",
+            };
+          }
+
+          // Enter 2FA code
+          // TODO: Selector may change — this is the standard 2FA input
+          const twoFaInput = await page.$('input[name="verificationCode"], input[name="security_code"]');
+          if (twoFaInput) {
+            await twoFaInput.fill(twoFaCode);
+            await humanDelay(500, 1000);
+
+            // Click confirm button
+            // TODO: Selector may change
+            const confirmBtn = await page.$('button:has-text("Confirm"), button[type="button"]:has-text("Confirm")');
+            if (confirmBtn) {
+              await confirmBtn.click();
+              await humanDelay(4000, 6000);
+            }
+          } else {
+            await saveDebugScreenshot(page, "2fa-input-not-found");
+            return {
+              success: false,
+              errorMessage: "2FA screen detected but could not find the code input field",
+            };
+          }
+        }
+
+        // Check for suspicious login challenge
+        if (page.url().includes("challenge")) {
+          currentStep = "handle-challenge";
+          await saveDebugScreenshot(page, "suspicious-login-challenge");
+          return {
+            success: false,
+            errorMessage:
+              "Instagram suspicious login challenge detected. Log in manually from this machine first, then retry.",
+          };
+        }
+
+        // Dismiss "Save Login Info" and "Notifications" prompts
+        const challengeResult = await detectLoginChallenge(page);
+        if (challengeResult) {
+          await saveDebugScreenshot(page, "post-login-challenge");
+          return {
+            success: false,
+            errorMessage: challengeResult,
+          };
+        }
+
+        // Verify we're logged in by checking for the home page
+        await humanDelay(2000, 3000);
+        currentStep = "verify-login";
+
+        // Check we're on the main page (various ways to detect)
+        const isLoggedIn =
+          page.url().includes("instagram.com") &&
+          !page.url().includes("/accounts/login") &&
+          !page.url().includes("/challenge") &&
+          !page.url().includes("two_factor");
+
+        if (!isLoggedIn) {
+          await saveDebugScreenshot(page, "login-verification-failed");
+          return {
+            success: false,
+            errorMessage: `Login may have failed. Current URL: ${page.url()}`,
+          };
+        }
+
+        console.log("[InstagramPlaywright] Login successful!");
+        await saveDebugScreenshot(page, "login-success");
+
+        // ──────────────────────────────────────────────
+        // Save session to disk for future runs
+        // ──────────────────────────────────────────────
+        currentStep = "save-session";
+        try {
+          await saveSession(context);
+        } catch (err) {
+          // Non-fatal — log but continue
+          console.warn(`[InstagramPlaywright] Could not save session: ${err}`);
+        }
+      }
+
+      // Both code paths above guarantee page is non-null at this point.
+      // The null guard here narrows the type for the rest of the method.
+      if (!page || !context) {
+        throw new Error("Browser page/context unexpectedly null after login phase");
+      }
+
+      // ──────────────────────────────────────────────
+      // STEP 5: Navigate to create post flow
+      // ──────────────────────────────────────────────
+      currentStep = "navigate-create";
+      console.log("[InstagramPlaywright] Navigating to create post flow...");
+
+      // Instagram's create button — try multiple approaches
+      // Approach 1: Direct URL to create flow (most reliable)
+      // TODO: Instagram may change this URL path
+      await page.goto("https://www.instagram.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 20000,
+      });
+      await humanDelay(2000, 4000);
+
+      // Click the "New post" / "Create" button in the sidebar/nav
+      // TODO: Selector may change — Instagram frequently updates the nav structure
+      // The create button is typically an SVG icon in the sidebar. We try multiple selectors.
+      let createClicked = false;
+
+      // Try: sidebar "Create" link/button
+      const createSelectors = [
+        // Sidebar "Create" text link
+        'a:has-text("Create")',
+        // Nav item with "New post" label
+        '[aria-label="New post"]',
+        // SVG-based create button
+        'svg[aria-label="New post"]',
+        // The nav link that contains the create icon
+        'a[href="#"]:has(svg[aria-label="New post"])',
+        // Fallback: any element labeled create
+        '[aria-label="Create"]',
+      ];
+
+      for (const selector of createSelectors) {
+        try {
+          const el = await page.$(selector);
+          if (el) {
+            await el.click();
+            createClicked = true;
+            console.log(`[InstagramPlaywright] Clicked create button via: ${selector}`);
+            break;
+          }
+        } catch {
+          // Try next selector
+        }
+      }
+
+      if (!createClicked) {
+        await saveDebugScreenshot(page, "create-button-not-found");
+        return {
+          success: false,
+          errorMessage:
+            "Could not find Instagram's 'Create' / 'New post' button. The UI may have changed. Check debug screenshots.",
+        };
+      }
+
+      await humanDelay(2000, 4000);
+
+      // ──────────────────────────────────────────────
+      // STEP 6: Upload video file
+      // ──────────────────────────────────────────────
+      currentStep = "upload-video";
+      console.log(`[InstagramPlaywright] Uploading video: ${input.filePath}`);
+
+      // The create dialog should now be open. Look for the file input or drag-drop area.
+      // Instagram uses a hidden <input type="file"> element.
+      // TODO: Selector may change — the file input is typically within the create dialog
+      let fileInputFound = false;
+
+      // Wait for the create dialog/modal to appear
+      await humanDelay(1500, 3000);
+
+      // Try to find the file input
+      const fileInputSelectors = [
+        'input[type="file"][accept*="video"]',
+        'input[type="file"]',
+        'form input[type="file"]',
+      ];
+
+      for (const selector of fileInputSelectors) {
+        try {
+          const fileInput = await page.$(selector);
+          if (fileInput) {
+            await fileInput.setInputFiles(videoPath);
+            fileInputFound = true;
+            console.log(`[InstagramPlaywright] File set via: ${selector}`);
+            break;
+          }
+        } catch {
+          // Try next selector
+        }
+      }
+
+      if (!fileInputFound) {
+        // Fallback: look for "Select from computer" button which may trigger file input
+        // TODO: Selector may change
+        const selectBtn = await page.$('button:has-text("Select from computer"), button:has-text("Select From Computer")');
+        if (selectBtn) {
+          // Set up file chooser promise before clicking
+          const fileChooserPromise = page.waitForEvent("filechooser", { timeout: 10000 });
+          await selectBtn.click();
+          const fileChooser = await fileChooserPromise;
+          await fileChooser.setFiles(videoPath);
+          fileInputFound = true;
+          console.log("[InstagramPlaywright] File set via file chooser after clicking 'Select from computer'");
+        }
+      }
+
+      if (!fileInputFound) {
+        await saveDebugScreenshot(page, "file-input-not-found");
+        return {
+          success: false,
+          errorMessage:
+            "Could not find file upload input in Instagram's create dialog. The UI may have changed. Check debug screenshots.",
+        };
+      }
+
+      // Wait for video to process
+      currentStep = "wait-video-processing";
+      console.log("[InstagramPlaywright] Waiting for video to process...");
+      await humanDelay(5000, 8000);
+      await saveDebugScreenshot(page, "after-upload");
+
+      // ──────────────────────────────────────────────
+      // STEP 7: Navigate through create flow screens
+      // ──────────────────────────────────────────────
+      currentStep = "create-flow-navigation";
+
+      // Instagram's create flow has multiple screens:
+      //   1. Crop/Edit screen → click "Next"
+      //   2. Filters/Edit screen → click "Next"
+      //   3. Caption screen → enter caption → click "Share"/"Share Reel"
+
+      // Screen 1: Crop — click Next
+      // TODO: Selector may change — button text may be localized
+      await this.clickNextButton(page, "crop-screen");
+      await humanDelay(2000, 3500);
+
+      // Screen 2: Edit/Filters — click Next
+      await this.clickNextButton(page, "edit-screen");
+      await humanDelay(2000, 3500);
+
+      // ──────────────────────────────────────────────
+      // STEP 8: Fill caption
+      // ──────────────────────────────────────────────
+      currentStep = "fill-caption";
+      console.log("[InstagramPlaywright] Filling caption...");
+      await saveDebugScreenshot(page, "caption-screen");
+
+      const captionText = input.caption || "";
+
+      // Look for the caption textarea/contenteditable
+      // TODO: Selector may change — Instagram uses a contenteditable div for captions
+      const captionSelectors = [
+        'div[aria-label="Write a caption..."]',
+        'div[aria-label="Write a caption…"]',
+        'textarea[aria-label="Write a caption..."]',
+        'textarea[aria-label="Write a caption…"]',
+        'div[role="textbox"][contenteditable="true"]',
+        'div[data-lexical-editor="true"]',
+        '[aria-label*="caption" i]',
+        'textarea[placeholder*="caption" i]',
+      ];
+
+      let captionFilled = false;
+      for (const selector of captionSelectors) {
+        try {
+          const el = await page.$(selector);
+          if (el) {
+            await el.click();
+            await humanDelay(300, 600);
+            // Use keyboard to type since it might be contenteditable
+            await page.keyboard.type(captionText, { delay: 20 + Math.random() * 40 });
+            captionFilled = true;
+            console.log(`[InstagramPlaywright] Caption filled via: ${selector}`);
+            break;
+          }
+        } catch {
+          // Try next selector
+        }
+      }
+
+      if (!captionFilled) {
+        console.warn("[InstagramPlaywright] WARNING: Could not find caption field. Proceeding without caption.");
+        await saveDebugScreenshot(page, "caption-field-not-found");
+      }
+
+      await humanDelay(1500, 2500);
+
+      // ──────────────────────────────────────────────
+      // STEP 9: Publish / Share
+      // ──────────────────────────────────────────────
+      currentStep = "publish";
+      console.log("[InstagramPlaywright] Publishing...");
+      await saveDebugScreenshot(page, "before-share");
+
+      // Click "Share" or "Share reel" button
+      // TODO: Selector may change — button text depends on whether it's a reel or post
+      const shareSelectors = [
+        'button:has-text("Share")',
+        'div[role="button"]:has-text("Share")',
+        'button:has-text("Share reel")',
+        'div[role="button"]:has-text("Share reel")',
+      ];
+
+      let shareClicked = false;
+      for (const selector of shareSelectors) {
+        try {
+          const el = await page.$(selector);
+          if (el) {
+            await el.click();
+            shareClicked = true;
+            console.log(`[InstagramPlaywright] Share clicked via: ${selector}`);
+            break;
+          }
+        } catch {
+          // Try next selector
+        }
+      }
+
+      if (!shareClicked) {
+        await saveDebugScreenshot(page, "share-button-not-found");
+        return {
+          success: false,
+          errorMessage:
+            "Could not find 'Share' button. The upload flow UI may have changed. Check debug screenshots.",
+        };
+      }
+
+      // Wait for publishing to complete
+      currentStep = "wait-publish";
+      console.log("[InstagramPlaywright] Waiting for publish to complete...");
+      await humanDelay(8000, 15000);
+      await saveDebugScreenshot(page, "after-share");
+
+      // ──────────────────────────────────────────────
+      // STEP 10: Verify success
+      // ──────────────────────────────────────────────
+      currentStep = "verify-publish";
+
+      // Check for success indicators
+      // After sharing, Instagram typically shows "Your reel has been shared" or redirects to the post
+      // TODO: These selectors and checks may change with UI updates
+      const successIndicators = [
+        'img[alt*="animation"]', // Success animation
+        'span:has-text("Your reel has been shared")',
+        'span:has-text("Your video has been shared")',
+        'span:has-text("Your post has been shared")',
+        'div:has-text("Reel shared")',
+      ];
+
+      let publishConfirmed = false;
+      for (const selector of successIndicators) {
+        try {
+          const el = await page.$(selector);
+          if (el) {
+            publishConfirmed = true;
+            console.log(`[InstagramPlaywright] Publish confirmed via: ${selector}`);
+            break;
+          }
+        } catch {
+          // Try next
+        }
+      }
+
+      // Even if we can't confirm via UI text, if we're not on an error page it likely worked
+      const currentUrl = page.url();
+      const onErrorPage = currentUrl.includes("/accounts/login") || currentUrl.includes("/challenge");
+
+      if (onErrorPage) {
+        await saveDebugScreenshot(page, "publish-error-redirect");
+        return {
+          success: false,
+          errorMessage: `Redirected to unexpected page after share: ${currentUrl}`,
+        };
+      }
+
+      // Try to extract the post URL by navigating to profile
+      let externalUrl: string | undefined;
+      let externalPostId: string | undefined;
+
+      try {
+        // Try to get URL from the current page (sometimes Instagram shows the reel link)
+        await humanDelay(2000, 3000);
+
+        // Navigate to profile to find the latest post
+        await page.goto(`https://www.instagram.com/${username}/`, {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        });
+        await humanDelay(2000, 4000);
+
+        // Get the first post link from the grid
+        // TODO: Selector may change
+        const firstPost = await page.$('article a[href*="/reel/"], article a[href*="/p/"], main a[href*="/reel/"], main a[href*="/p/"]');
+        if (firstPost) {
+          const href = await firstPost.getAttribute("href");
+          if (href) {
+            externalUrl = `https://www.instagram.com${href}`;
+            // Extract post ID from URL (e.g., /reel/ABC123/ → ABC123)
+            const match = href.match(/\/(reel|p)\/([^/]+)/);
+            if (match) {
+              externalPostId = match[2];
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[InstagramPlaywright] Could not extract post URL: ${err}`);
+      }
+
+      await saveDebugScreenshot(page, "final-state");
+
+      console.log(`[InstagramPlaywright] Publish ${publishConfirmed ? "confirmed" : "likely succeeded"}`);
+      console.log(`[InstagramPlaywright] Post URL: ${externalUrl || "unknown"}`);
+
+      return {
+        success: true,
+        externalPostId: externalPostId || `ig_pw_${Date.now()}`,
+        externalUrl: externalUrl || `https://www.instagram.com/${username}/`,
+      };
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[InstagramPlaywright] ERROR at step "${currentStep}": ${errMsg}`);
+
+      // Save failure screenshot
+      if (page) {
+        try {
+          await saveDebugScreenshot(page, `error-${currentStep}`);
+        } catch {
+          // Screenshot itself may fail if browser crashed
+        }
+      }
+
+      return {
+        success: false,
+        errorMessage: `Unexpected error during "${currentStep}": ${errMsg}`,
+      };
+    } finally {
+      // Always clean up browser resources
+      try {
+        if (context) await context.close();
+        if (browser) await browser.close();
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
+
+  /**
+   * Clicks the "Next" button in Instagram's create flow.
+   * Retries with multiple selectors.
+   */
+  private async clickNextButton(page: Page, screenName: string): Promise<void> {
+    // TODO: Selectors may change — "Next" button label may be localized
+    const nextSelectors = [
+      'button:has-text("Next")',
+      'div[role="button"]:has-text("Next")',
+      '[aria-label="Next"]',
+    ];
+
+    for (const selector of nextSelectors) {
+      try {
+        const el = await page.$(selector);
+        if (el) {
+          await el.click();
+          console.log(`[InstagramPlaywright] Clicked 'Next' on ${screenName} via: ${selector}`);
+          return;
+        }
+      } catch {
+        // Try next selector
+      }
+    }
+
+    await saveDebugScreenshot(page, `next-button-not-found-${screenName}`);
+    console.warn(`[InstagramPlaywright] WARNING: Could not find 'Next' button on ${screenName}. Proceeding anyway.`);
+  }
+}

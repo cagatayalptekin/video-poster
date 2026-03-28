@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model AdminUser {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SocialAccount {
+  id           String   @id @default(uuid())
+  platform     String   // tiktok | instagram | youtube
+  accountName  String
+  username     String
+  isActive     Boolean  @default(true)
+  authType     String   @default("manual") // manual | oauth
+  accessToken  String?
+  refreshToken String?
+  metadata     String?  // JSON string
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  targets  VideoPlatformTarget[]
+  logs     JobLog[]
+}
+
+model VideoQueueItem {
+  id               String   @id @default(uuid())
+  originalFilename String
+  storedFilename   String
+  filePath         String
+  caption          String?
+  hashtags         String?
+  status           String   @default("queued") // queued | processing | partially_posted | completed | failed
+  scheduledAt      DateTime?
+  processedAt      DateTime?
+  retryCount       Int      @default(0)
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  targets VideoPlatformTarget[]
+  logs    JobLog[]
+}
+
+model VideoPlatformTarget {
+  id               String   @id @default(uuid())
+  videoQueueItemId String
+  platform         String   // tiktok | instagram | youtube
+  socialAccountId  String
+  status           String   @default("pending") // pending | posting | success | failed
+  externalPostId   String?
+  externalUrl      String?
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  videoQueueItem VideoQueueItem @relation(fields: [videoQueueItemId], references: [id], onDelete: Cascade)
+  socialAccount  SocialAccount  @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+}
+
+model JobLog {
+  id               String   @id @default(uuid())
+  level            String   @default("info") // info | warn | error | success
+  context          String?  // e.g. "scheduler", "upload", "publish"
+  message          String
+  details          String?  // JSON string for extra data
+  platform         String?
+  socialAccountId  String?
+  videoQueueItemId String?
+  createdAt        DateTime @default(now())
+
+  socialAccount  SocialAccount?  @relation(fields: [socialAccountId], references: [id], onDelete: SetNull)
+  videoQueueItem VideoQueueItem? @relation(fields: [videoQueueItemId], references: [id], onDelete: SetNull)
+}
+
+model AppSetting {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
