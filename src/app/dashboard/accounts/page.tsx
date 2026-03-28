@@ -45,6 +45,16 @@ export default function AccountsPage() {
 
   useEffect(() => {
     loadAccounts();
+    // Check for OAuth success/error in URL
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("tiktok_success") === "true" || params.get("youtube_success") === "true") {
+      setToast({ message: "Account connected successfully!", type: "success" });
+      window.history.replaceState({}, "", "/dashboard/accounts");
+    }
+    if (params.get("error")) {
+      setToast({ message: `OAuth error: ${params.get("error")}`, type: "error" });
+      window.history.replaceState({}, "", "/dashboard/accounts");
+    }
   }, []);
 
   useEffect(() => {
@@ -108,6 +118,37 @@ export default function AccountsPage() {
     }
   }
 
+  async function connectOAuth(platform: "tiktok" | "youtube") {
+    try {
+      // Create a provisional account first
+      const res = await fetch("/api/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform,
+          accountName: `${platform} account`,
+          username: "pending-oauth",
+          isActive: true,
+          authType: "oauth",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setToast({ message: data.error || "Failed to create account", type: "error" });
+        return;
+      }
+      const account = await res.json();
+      // Redirect to OAuth flow
+      window.location.href = `/api/auth/${platform}?accountId=${account.id}`;
+    } catch {
+      setToast({ message: "Network error", type: "error" });
+    }
+  }
+
+  async function reconnectOAuth(account: SocialAccount) {
+    window.location.href = `/api/auth/${account.platform}?accountId=${account.id}`;
+  }
+
   return (
     <div>
       {/* Toast */}
@@ -119,9 +160,17 @@ export default function AccountsPage() {
 
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">Social Accounts</h1>
-        <button onClick={openAdd} className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">
-          + Add Account
-        </button>
+        <div className="flex gap-2">
+          <button onClick={() => connectOAuth("tiktok")} className="px-4 py-2 bg-gray-900 text-white rounded-md hover:bg-gray-800 text-sm font-medium">
+            Connect TikTok
+          </button>
+          <button onClick={() => connectOAuth("youtube")} className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm font-medium">
+            Connect YouTube
+          </button>
+          <button onClick={openAdd} className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">
+            + Add Manually
+          </button>
+        </div>
       </div>
 
       {/* Form modal */}
@@ -210,6 +259,9 @@ export default function AccountsPage() {
                   <td className="px-4 py-3 text-gray-500">{account.authType}</td>
                   <td className="px-4 py-3">
                     <button onClick={() => openEdit(account)} className="text-blue-600 hover:text-blue-800 mr-3 text-xs font-medium">Edit</button>
+                    {(account.platform === "tiktok" || account.platform === "youtube") && (
+                      <button onClick={() => reconnectOAuth(account)} className="text-green-600 hover:text-green-800 mr-3 text-xs font-medium">Reconnect</button>
+                    )}
                     <button onClick={() => handleDelete(account.id)} className="text-red-600 hover:text-red-800 text-xs font-medium">Delete</button>
                   </td>
                 </tr>
