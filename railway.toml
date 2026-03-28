@@ -1,6 +1,6 @@
 [build]
 builder = "nixpacks"
-buildCommand = "npx prisma generate && npm run build"
+buildCommand = "npx prisma generate && npx playwright install chromium --with-deps && npm run build"
 
 [deploy]
 startCommand = "npx prisma migrate deploy && npx next start -p $PORT"
