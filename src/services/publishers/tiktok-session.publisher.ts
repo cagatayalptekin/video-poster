@@ -508,37 +508,63 @@ export class TikTokSessionPublisher implements PlatformPublisher {
 
   private async waitForVideoProcessing(page: Page): Promise<void> {
     // Wait for upload progress to complete
-    // TikTok shows a progress bar and "Uploaded" or percentage indicator
+    // TikTok shows a progress bar; once complete, the Post button becomes enabled
     const maxWaitMs = 300000; // 5 minutes max
-    const pollIntervalMs = 3000;
+    const pollIntervalMs = 5000;
     const startTime = Date.now();
 
     console.log("[TikTokSession] Waiting for video upload to complete (max 5 min)...");
 
+    let postButtonSeen = false;
+
     while (Date.now() - startTime < maxWaitMs) {
-      // Check for completion indicators
-      const completionIndicators = [
-        // Caption/description input appearing means upload is done
-        '[data-e2e="post-button"]',
+      // Check for the Post button specifically - TikTok Studio shows it once upload completes
+      const postBtnSelectors = [
         'button:has-text("Post")',
         'button:has-text("Publish")',
-        // Editor interface appearing
-        '[class*="DivEditorContainer"]',
-        '[data-e2e="caption-input"]',
-        // Progress complete
-        '[class*="success"]',
-        '[class*="completed"]',
+        'div[role="button"]:has-text("Post")',
+        '[data-e2e="post-button"]',
       ];
 
-      for (const selector of completionIndicators) {
+      for (const selector of postBtnSelectors) {
         try {
           const el = await page.$(selector);
-          if (el && (await el.isVisible())) {
-            console.log(`[TikTokSession] Upload completed - detected: ${selector}`);
-            return;
+          if (el) {
+            const visible = await el.isVisible().catch(() => false);
+            const disabled = await el.isDisabled().catch(() => false);
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            console.log(`[TikTokSession] Post button: visible=${visible} disabled=${disabled} (${elapsed}s)`);
+
+            if (visible && !disabled) {
+              console.log(`[TikTokSession] Upload completed - Post button is ready: ${selector}`);
+              return;
+            }
+            postButtonSeen = true;
           }
         } catch {
           // Continue
+        }
+      }
+
+      // Also check for editor/caption area as an indicator
+      if (!postButtonSeen) {
+        const completionIndicators = [
+          '[class*="DivEditorContainer"]',
+          '[data-e2e="caption-input"]',
+          '[contenteditable="true"]',
+          '[role="textbox"]',
+        ];
+
+        for (const selector of completionIndicators) {
+          try {
+            const el = await page.$(selector);
+            if (el && (await el.isVisible().catch(() => false))) {
+              console.log(`[TikTokSession] Upload completed - detected: ${selector}`);
+              return;
+            }
+          } catch {
+            // Continue
+          }
         }
       }
 
@@ -618,42 +644,91 @@ export class TikTokSessionPublisher implements PlatformPublisher {
   }
 
   private async clickPostButton(page: Page): Promise<boolean> {
+    // First, log all visible buttons on the page for debugging
+    try {
+      const allButtons = await page.$$("button");
+      console.log(`[TikTokSession] Found ${allButtons.length} buttons on page`);
+      for (const btn of allButtons) {
+        const text = (await btn.textContent())?.trim().substring(0, 50) || "";
+        const visible = await btn.isVisible().catch(() => false);
+        const disabled = await btn.isDisabled().catch(() => false);
+        if (text) {
+          console.log(`[TikTokSession]   Button: "${text}" visible=${visible} disabled=${disabled}`);
+        }
+      }
+    } catch (e) {
+      console.log(`[TikTokSession] Could not enumerate buttons: ${e}`);
+    }
+
+    // Also check for div-based buttons (TikTok Studio uses these)
+    try {
+      const divButtons = await page.$$('div[role="button"]');
+      console.log(`[TikTokSession] Found ${divButtons.length} div[role=button] on page`);
+      for (const btn of divButtons) {
+        const text = (await btn.textContent())?.trim().substring(0, 50) || "";
+        const visible = await btn.isVisible().catch(() => false);
+        if (text) {
+          console.log(`[TikTokSession]   DivButton: "${text}" visible=${visible}`);
+        }
+      }
+    } catch (e) {
+      console.log(`[TikTokSession] Could not enumerate div buttons: ${e}`);
+    }
+
     const postSelectors = [
       '[data-e2e="post-button"]',
       'button:has-text("Post")',
       'button:has-text("Publish")',
       'button:has-text("Upload")',
-      // Try different TikTok Creator Center button patterns
+      // TikTok Studio uses div-based buttons
+      'div[role="button"]:has-text("Post")',
+      'div[role="button"]:has-text("Publish")',
       'div[class*="DivButton"]:has-text("Post")',
       'button[class*="Button"]:has-text("Post")',
+      // Broader matches
+      '*[class*="post-button"]',
+      '*[class*="PostButton"]',
+      '*[class*="btn-post"]',
     ];
 
     for (const selector of postSelectors) {
       try {
         const btn = await page.$(selector);
         if (btn) {
-          const isDisabled = await btn.getAttribute("disabled");
-          if (isDisabled !== null) {
-            console.log(`[TikTokSession] Post button found but disabled: ${selector}`);
+          const visible = await btn.isVisible().catch(() => true);
+          if (!visible) {
+            console.log(`[TikTokSession] Post button found but not visible: ${selector}`);
             continue;
           }
-          await btn.click();
+          const disabled = await btn.isDisabled().catch(() => false);
+          if (disabled) {
+            console.log(`[TikTokSession] Post button found but disabled: ${selector}`);
+            // Wait up to 30s for it to become enabled
+            try {
+              await page.waitForSelector(`${selector}:not([disabled])`, { timeout: 30000 });
+              console.log(`[TikTokSession] Post button became enabled: ${selector}`);
+            } catch {
+              console.log(`[TikTokSession] Post button still disabled after 30s: ${selector}`);
+              continue;
+            }
+          }
+          await btn.click({ force: true });
           console.log(`[TikTokSession] Clicked post button: ${selector}`);
           return true;
         }
-      } catch {
-        // Try next selector
+      } catch (e) {
+        console.log(`[TikTokSession] Error trying selector ${selector}: ${e}`);
       }
     }
 
-    // Last resort: try clicking by position
+    // Last resort: try clicking any button/div with Post/Publish text
     try {
-      const buttons = await page.$$("button");
-      for (const btn of buttons) {
+      const allClickable = await page.$$("button, div[role='button'], a[role='button']");
+      for (const btn of allClickable) {
         const text = await btn.textContent();
-        if (text && /^(post|publish|upload)$/i.test(text.trim())) {
-          await btn.click();
-          console.log(`[TikTokSession] Clicked button by text: "${text.trim()}"`);
+        if (text && /^(post|publish)$/i.test(text.trim())) {
+          await btn.click({ force: true });
+          console.log(`[TikTokSession] Clicked element by text: "${text.trim()}"`);
           return true;
         }
       }
