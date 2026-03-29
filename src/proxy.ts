@@ -38,6 +38,7 @@ export async function proxy(request: NextRequest) {
   if (
     pathname === "/login" ||
     pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api/videos/serve/") ||
     pathname.startsWith("/_next") ||
     pathname.startsWith("/favicon")
   ) {

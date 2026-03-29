@@ -3,11 +3,16 @@ import { YoutubePublisher } from "./youtube-publisher";
 import { YouTubeApiPublisher } from "./youtube-api.publisher";
 import { InstagramPublisher } from "./instagram-publisher";
 import { InstagramPlaywrightPublisher } from "./instagram-playwright.publisher";
+import { InstagramApiPublisher } from "./instagram-api.publisher";
 import { TikTokPublisher } from "./tiktok-publisher";
 import { TikTokApiPublisher } from "./tiktok-api.publisher";
 
 function createInstagramPublisher(): PlatformPublisher {
   const provider = process.env.INSTAGRAM_PROVIDER || "mock";
+  if (provider === "official") {
+    console.log("[Registry] Using official Instagram API publisher");
+    return new InstagramApiPublisher();
+  }
   if (provider === "playwright") {
     console.log("[Registry] Using Playwright Instagram publisher");
     return new InstagramPlaywrightPublisher();

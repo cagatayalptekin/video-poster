@@ -47,12 +47,13 @@ export default function AccountsPage() {
     loadAccounts();
     // Check for OAuth success/error in URL
     const params = new URLSearchParams(window.location.search);
-    if (params.get("tiktok_success") === "true" || params.get("youtube_success") === "true") {
+    if (params.get("tiktok_success") === "true" || params.get("youtube_success") === "true" || params.get("instagram_success") === "true") {
       setToast({ message: "Account connected successfully!", type: "success" });
       window.history.replaceState({}, "", "/dashboard/accounts");
     }
-    if (params.get("error")) {
-      setToast({ message: `OAuth error: ${params.get("error")}`, type: "error" });
+    if (params.get("error") || params.get("instagram_error") || params.get("youtube_error")) {
+      const errMsg = params.get("error") || params.get("instagram_error") || params.get("youtube_error");
+      setToast({ message: `OAuth error: ${errMsg}`, type: "error" });
       window.history.replaceState({}, "", "/dashboard/accounts");
     }
   }, []);
@@ -118,7 +119,7 @@ export default function AccountsPage() {
     }
   }
 
-  async function connectOAuth(platform: "tiktok" | "youtube") {
+  async function connectOAuth(platform: "tiktok" | "youtube" | "instagram") {
     try {
       // Create a provisional account first
       const res = await fetch("/api/accounts", {
@@ -166,6 +167,9 @@ export default function AccountsPage() {
           </button>
           <button onClick={() => connectOAuth("youtube")} className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm font-medium">
             Connect YouTube
+          </button>
+          <button onClick={() => connectOAuth("instagram")} className="px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-md hover:from-purple-700 hover:to-pink-700 text-sm font-medium">
+            Connect Instagram
           </button>
           <button onClick={openAdd} className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">
             + Add Manually
