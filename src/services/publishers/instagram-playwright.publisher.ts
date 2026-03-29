@@ -704,6 +704,37 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         await humanDelay(2000, 3000);
         currentStep = "verify-login";
 
+        // Log current state for debugging
+        try {
+          const verifyTitle = await page.title();
+          const verifyButtons = await page.evaluate(() =>
+            Array.from(document.querySelectorAll("button, [role='button']"))
+              .filter((el) => (el as HTMLElement).offsetParent !== null)
+              .map((el) => el.textContent?.trim().substring(0, 50))
+              .filter(Boolean)
+              .slice(0, 10)
+          );
+          const verifyInputs = await page.evaluate(() =>
+            Array.from(document.querySelectorAll("input")).map((el) => ({
+              type: (el as HTMLInputElement).type,
+              name: (el as HTMLInputElement).name,
+            }))
+          );
+          console.log(`[InstagramPlaywright] Post-login URL: ${page.url()}`);
+          console.log(`[InstagramPlaywright] Post-login title: "${verifyTitle}"`);
+          console.log(`[InstagramPlaywright] Post-login buttons: ${JSON.stringify(verifyButtons)}`);
+          console.log(`[InstagramPlaywright] Post-login inputs: ${JSON.stringify(verifyInputs)}`);
+          // Check for error messages
+          const alertEl = await page.$('[role="alert"], #slfErrorAlert, [data-testid="login-error-message"]');
+          if (alertEl) {
+            const alertText = await alertEl.textContent();
+            console.log(`[InstagramPlaywright] Post-login alert: "${alertText?.trim()}"`);
+          }
+          // Dump body HTML for further diagnosis
+          const postLoginHtml = await page.evaluate(() => document.body?.innerHTML?.substring(0, 600) ?? "");
+          console.log(`[InstagramPlaywright] Post-login body sample: ${postLoginHtml}`);
+        } catch { /* ignore */ }
+
         // Check we're on the main page (various ways to detect)
         const isLoggedIn =
           page.url().includes("instagram.com") &&
