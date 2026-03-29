@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { exchangeTikTokCode } from "@/services/publishers/tiktok-token-helper";
 
+function appUrl(path: string): string {
+  const base = process.env.APP_URL || process.env.NEXTAUTH_URL || "http://localhost:3000";
+  return `${base.replace(/\/$/, "")}${path}`;
+}
+
 /**
  * GET /api/auth/tiktok/callback — Handle TikTok OAuth callback.
  *
@@ -15,23 +20,17 @@ export async function GET(request: NextRequest) {
 
   if (error) {
     const desc = request.nextUrl.searchParams.get("error_description") || error;
-    return NextResponse.redirect(
-      new URL(`/dashboard/accounts?tiktok_error=${encodeURIComponent(desc)}`, request.url)
-    );
+    return NextResponse.redirect(appUrl(`/dashboard/accounts?tiktok_error=${encodeURIComponent(desc)}`));
   }
 
   if (!code || !state) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?tiktok_error=missing_code_or_state", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?tiktok_error=missing_code_or_state"));
   }
 
   // Parse state = accountId:nonce
   const colonIdx = state.indexOf(":");
   if (colonIdx === -1) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?tiktok_error=invalid_state", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?tiktok_error=invalid_state"));
   }
   const accountId = state.substring(0, colonIdx);
 
@@ -40,9 +39,7 @@ export async function GET(request: NextRequest) {
   const redirectUri = process.env.TIKTOK_REDIRECT_URI;
 
   if (!clientKey || !clientSecret || !redirectUri) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?tiktok_error=missing_env_vars", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?tiktok_error=missing_env_vars"));
   }
 
   // Exchange code for tokens
@@ -54,9 +51,7 @@ export async function GET(request: NextRequest) {
   });
 
   if (!tokens) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?tiktok_error=token_exchange_failed", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?tiktok_error=token_exchange_failed"));
   }
 
   // Update the SocialAccount with tokens and open_id
@@ -75,13 +70,9 @@ export async function GET(request: NextRequest) {
 
     console.log(`[TikTokOAuth] Tokens stored for account ${accountId} (open_id: ${tokens.openId})`);
 
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?tiktok_success=true", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?tiktok_success=true"));
   } catch (err) {
     console.error(`[TikTokOAuth] Failed to update account ${accountId}:`, err);
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?tiktok_error=db_update_failed", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?tiktok_error=db_update_failed"));
   }
 }

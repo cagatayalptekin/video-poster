@@ -8,6 +8,11 @@ import { exchangeYouTubeCode } from "@/services/publishers/youtube-token-helper"
  * Google redirects here with ?code=...&state=...
  * We exchange the code for tokens and store them on the SocialAccount.
  */
+function appUrl(path: string): string {
+  const base = process.env.APP_URL || process.env.NEXTAUTH_URL || "http://localhost:3000";
+  return `${base.replace(/\/$/, "")}${path}`;
+}
+
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
   const state = request.nextUrl.searchParams.get("state");
@@ -15,23 +20,17 @@ export async function GET(request: NextRequest) {
 
   if (error) {
     const desc = error;
-    return NextResponse.redirect(
-      new URL(`/dashboard/accounts?youtube_error=${encodeURIComponent(desc)}`, request.url)
-    );
+    return NextResponse.redirect(appUrl(`/dashboard/accounts?youtube_error=${encodeURIComponent(desc)}`));
   }
 
   if (!code || !state) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?youtube_error=missing_code_or_state", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_error=missing_code_or_state"));
   }
 
   // Parse state = accountId:nonce
   const colonIdx = state.indexOf(":");
   if (colonIdx === -1) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?youtube_error=invalid_state", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_error=invalid_state"));
   }
   const accountId = state.substring(0, colonIdx);
 
@@ -40,9 +39,7 @@ export async function GET(request: NextRequest) {
   const redirectUri = process.env.YOUTUBE_REDIRECT_URI;
 
   if (!clientId || !clientSecret || !redirectUri) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?youtube_error=missing_env_vars", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_error=missing_env_vars"));
   }
 
   // Exchange code for tokens
@@ -54,9 +51,7 @@ export async function GET(request: NextRequest) {
   });
 
   if (!tokens) {
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?youtube_error=token_exchange_failed", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_error=token_exchange_failed"));
   }
 
   // Update the SocialAccount with tokens
@@ -75,13 +70,9 @@ export async function GET(request: NextRequest) {
 
     console.log(`[YouTubeOAuth] Tokens stored for account ${accountId}`);
 
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?youtube_success=true", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_success=true"));
   } catch (dbErr) {
     console.error(`[YouTubeOAuth] Failed to store tokens: ${dbErr}`);
-    return NextResponse.redirect(
-      new URL("/dashboard/accounts?youtube_error=db_update_failed", request.url)
-    );
+    return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_error=db_update_failed"));
   }
 }
