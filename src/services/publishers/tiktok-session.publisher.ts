@@ -19,7 +19,7 @@ async function saveDebugScreenshot(page: Page, stepName: string): Promise<string
   const filename = `tt-${stepName}-${timestamp}.png`;
   const filepath = path.join(SCREENSHOT_DIR, filename);
   try {
-    await page.screenshot({ path: filepath, fullPage: true });
+    await page.screenshot({ path: filepath, fullPage: false, timeout: 10000 });
     console.log(`[TikTokSession] Debug screenshot saved: ${filepath}`);
   } catch (err) {
     console.error(`[TikTokSession] Failed to save screenshot: ${err}`);
@@ -182,7 +182,7 @@ export class TikTokSessionPublisher implements PlatformPublisher {
 
       // First visit TikTok homepage to let cookies take effect and get additional cookies from JS
       await page.goto("https://www.tiktok.com/", {
-        waitUntil: "load",
+        waitUntil: "domcontentloaded",
         timeout: 30000,
       });
       await humanDelay(4000, 6000);
@@ -217,7 +217,7 @@ export class TikTokSessionPublisher implements PlatformPublisher {
           if (link) {
             console.log(`[TikTokSession] Clicking upload link: ${selector}`);
             await link.click();
-            await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+            await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
             await humanDelay(3000, 5000);
             const url = page.url();
             console.log(`[TikTokSession] After clicking upload: ${url}`);
@@ -246,7 +246,7 @@ export class TikTokSessionPublisher implements PlatformPublisher {
         for (const uploadUrl of uploadUrls) {
           try {
             console.log(`[TikTokSession] Trying direct navigation: ${uploadUrl}`);
-            await page.goto(uploadUrl, { waitUntil: "load", timeout: 20000 });
+            await page.goto(uploadUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
             await humanDelay(3000, 5000);
             const url = page.url();
             console.log(`[TikTokSession] After navigation: ${url}`);

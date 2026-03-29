@@ -10,13 +10,14 @@ const p = new PrismaClient({
 async function main() {
   const videos = await p.videoQueueItem.findMany({
     orderBy: { createdAt: "desc" },
-    take: 3,
+    take: 5,
     include: { targets: true },
   });
+  console.log(`Found ${videos.length} videos`);
   for (const v of videos) {
-    console.log(`Video: ${v.originalFilename} | Status: ${v.status}`);
+    console.log(`Video: ${v.originalFilename} | Status: ${v.status} | Error: ${v.errorMessage || "none"}`);
     for (const t of v.targets) {
-      console.log(`  Target: ${t.platform} | Status: ${t.status} | Error: ${t.errorMessage || "none"}`);
+      console.log(`  Target: ${t.platform} | Status: ${t.status} | PostId: ${t.externalPostId || "none"} | URL: ${t.externalUrl || "none"} | Error: ${t.errorMessage || "none"}`);
     }
   }
 }
