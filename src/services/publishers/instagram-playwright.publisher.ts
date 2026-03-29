@@ -372,11 +372,24 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         // ──────────────────────────────────────────────
         currentStep = "navigate-login";
         console.log("[InstagramPlaywright] Navigating to Instagram login...");
-        await page.goto("https://www.instagram.com/accounts/login/", {
-          waitUntil: "load",
+        // First visit the homepage to warm up cookies/fingerprint before login
+        await page.goto("https://www.instagram.com/", {
+          waitUntil: "networkidle",
           timeout: 45000,
         });
-        await humanDelay(3000, 5000);
+        await humanDelay(4000, 7000);
+        console.log(`[InstagramPlaywright] Homepage URL: ${page.url()}, title: "${await page.title()}"`);
+        try {
+          const homeHtml = await page.evaluate(() => document.body?.innerHTML?.substring(0, 300) ?? "");
+          console.log(`[InstagramPlaywright] Homepage body sample: ${homeHtml}`);
+        } catch { /* ignore */ }
+
+        // Now navigate to login page
+        await page.goto("https://www.instagram.com/accounts/login/", {
+          waitUntil: "networkidle",
+          timeout: 45000,
+        });
+        await humanDelay(4000, 6000);
 
         // Log page state after initial load
         console.log(`[InstagramPlaywright] Page URL after load: ${page.url()}`);
