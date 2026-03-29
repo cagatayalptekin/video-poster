@@ -372,23 +372,49 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         // ──────────────────────────────────────────────
         currentStep = "navigate-login";
         console.log("[InstagramPlaywright] Navigating to Instagram login...");
-        // First visit the homepage to warm up cookies/fingerprint before login
+        // Visit homepage and click "Log in" button — avoids direct navigation to /accounts/login/
+        // which triggers Instagram's bot detection (blank page)
         await page.goto("https://www.instagram.com/", {
           waitUntil: "networkidle",
           timeout: 45000,
         });
-        await humanDelay(4000, 7000);
+        await humanDelay(5000, 8000);
         console.log(`[InstagramPlaywright] Homepage URL: ${page.url()}, title: "${await page.title()}"`);
         try {
           const homeHtml = await page.evaluate(() => document.body?.innerHTML?.substring(0, 300) ?? "");
           console.log(`[InstagramPlaywright] Homepage body sample: ${homeHtml}`);
         } catch { /* ignore */ }
 
-        // Now navigate to login page
-        await page.goto("https://www.instagram.com/accounts/login/", {
-          waitUntil: "networkidle",
-          timeout: 45000,
-        });
+        // Try clicking the "Log in" link/button on the homepage instead of hard-navigating to login URL
+        let navigatedToLogin = false;
+        const loginLinkSelectors = [
+          'a[href="/accounts/login/"]',
+          'a:has-text("Log in")',
+          'button:has-text("Log in")',
+          '[role="button"]:has-text("Log in")',
+          'a:has-text("Log In")',
+        ];
+        for (const sel of loginLinkSelectors) {
+          try {
+            const el = await page.$(sel);
+            if (el) {
+              console.log(`[InstagramPlaywright] Clicking homepage login link via: ${sel}`);
+              await el.click();
+              await page.waitForURL("**/accounts/login/**", { timeout: 15000 });
+              navigatedToLogin = true;
+              console.log(`[InstagramPlaywright] Navigated to login via click: ${page.url()}`);
+              break;
+            }
+          } catch { /* try next */ }
+        }
+        if (!navigatedToLogin) {
+          // Fall back: direct navigation to login page
+          console.log("[InstagramPlaywright] No login link found on homepage, navigating directly to /accounts/login/");
+          await page.goto("https://www.instagram.com/accounts/login/", {
+            waitUntil: "networkidle",
+            timeout: 45000,
+          });
+        }
         await humanDelay(4000, 6000);
 
         // Log page state after initial load
