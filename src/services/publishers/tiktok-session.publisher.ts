@@ -155,34 +155,23 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       currentStep = "set-cookies";
       console.log("[TikTokSession] Setting session cookies...");
 
+      // Set the full set of session cookies TikTok expects
+      const cookieBase = {
+        domain: ".tiktok.com" as const,
+        path: "/",
+        secure: true,
+        sameSite: "None" as const,
+      };
+
       await context.addCookies([
-        {
-          name: "sessionid",
-          value: cookies.sessionId,
-          domain: ".tiktok.com",
-          path: "/",
-          httpOnly: true,
-          secure: true,
-          sameSite: "None",
-        },
-        {
-          name: "tt-target-idc",
-          value: cookies.dcId,
-          domain: ".tiktok.com",
-          path: "/",
-          httpOnly: false,
-          secure: true,
-          sameSite: "None",
-        },
-        {
-          name: "tt_csrf_token",
-          value: this.generateCsrfToken(),
-          domain: ".tiktok.com",
-          path: "/",
-          httpOnly: false,
-          secure: true,
-          sameSite: "None",
-        },
+        { ...cookieBase, name: "sessionid", value: cookies.sessionId, httpOnly: true },
+        { ...cookieBase, name: "sessionid_ss", value: cookies.sessionId, httpOnly: true },
+        { ...cookieBase, name: "sid_tt", value: cookies.sessionId, httpOnly: true },
+        { ...cookieBase, name: "sid_guard", value: `${cookies.sessionId}|${Math.floor(Date.now() / 1000)}|5184000|${Math.floor(Date.now() / 1000) + 5184000}`, httpOnly: true },
+        { ...cookieBase, name: "tt-target-idc", value: cookies.dcId, httpOnly: false },
+        { ...cookieBase, name: "tt_csrf_token", value: this.generateCsrfToken(), httpOnly: false },
+        { ...cookieBase, name: "tt-target-idc-sign", value: this.generateCsrfToken(), httpOnly: false },
+        { ...cookieBase, name: "passport_csrf_token", value: this.generateCsrfToken(), httpOnly: false },
       ]);
 
       page = await context.newPage();
@@ -191,12 +180,12 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       currentStep = "navigate-upload";
       console.log("[TikTokSession] Navigating to TikTok Creator Center...");
 
-      // First visit TikTok homepage to let cookies take effect
+      // First visit TikTok homepage to let cookies take effect and get additional cookies from JS
       await page.goto("https://www.tiktok.com/", {
-        waitUntil: "domcontentloaded",
+        waitUntil: "load",
         timeout: 30000,
       });
-      await humanDelay(2000, 4000);
+      await humanDelay(4000, 6000);
       await saveDebugScreenshot(page, "01-homepage");
 
       // Check if we're logged in by looking for upload/profile elements
@@ -210,21 +199,79 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       }
       console.log("[TikTokSession] Session valid - user is logged in");
 
-      // Navigate to upload page
-      await page.goto("https://www.tiktok.com/creator-center/upload", {
-        waitUntil: "domcontentloaded",
-        timeout: 30000,
-      });
-      await humanDelay(3000, 5000);
+      // Navigate to the upload page by clicking the upload link first (more natural),
+      // then fall back to direct navigation with multiple possible URLs.
+      let onUploadPage = false;
+
+      // Strategy 1: Click the upload link on the homepage (respects TikTok's routing)
+      const uploadLinkSelectors = [
+        'a[href*="/upload"]',
+        'a[href*="/creator-center/upload"]',
+        'a[href*="/tiktokstudio/upload"]',
+        '[data-e2e="upload-icon"]',
+      ];
+
+      for (const selector of uploadLinkSelectors) {
+        try {
+          const link = await page.$(selector);
+          if (link) {
+            console.log(`[TikTokSession] Clicking upload link: ${selector}`);
+            await link.click();
+            await page.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+            await humanDelay(3000, 5000);
+            const url = page.url();
+            console.log(`[TikTokSession] After clicking upload: ${url}`);
+            if (!url.includes("/login")) {
+              onUploadPage = true;
+              break;
+            }
+            // Redirected to login - go back and try next selector
+            await page.goBack();
+            await humanDelay(1000, 2000);
+          }
+        } catch {
+          // Try next
+        }
+      }
+
+      // Strategy 2: Direct URL navigation to various upload page paths
+      if (!onUploadPage) {
+        const uploadUrls = [
+          "https://www.tiktok.com/tiktokstudio/upload",
+          "https://www.tiktok.com/upload",
+          "https://www.tiktok.com/creator-center/upload",
+          "https://www.tiktok.com/creator#/upload/upload",
+        ];
+
+        for (const uploadUrl of uploadUrls) {
+          try {
+            console.log(`[TikTokSession] Trying direct navigation: ${uploadUrl}`);
+            await page.goto(uploadUrl, { waitUntil: "load", timeout: 20000 });
+            await humanDelay(3000, 5000);
+            const url = page.url();
+            console.log(`[TikTokSession] After navigation: ${url}`);
+            if (!url.includes("/login")) {
+              onUploadPage = true;
+              break;
+            }
+          } catch (e) {
+            console.log(`[TikTokSession] Failed to navigate to ${uploadUrl}: ${e}`);
+          }
+        }
+      }
+
       await saveDebugScreenshot(page, "02-upload-page");
 
-      // Check if we landed on the upload page or got redirected
       const currentUrl = page.url();
       console.log(`[TikTokSession] Current URL: ${currentUrl}`);
 
-      if (currentUrl.includes("/login")) {
+      if (!onUploadPage || currentUrl.includes("/login")) {
         await saveDebugScreenshot(page, "02b-redirected-to-login");
-        return this.fail("Redirected to login page. Session cookie may be expired.");
+        return this.fail(
+          "Could not navigate to TikTok upload page. " +
+            "The session cookie may not have full access. " +
+            "Try providing more cookies from your browser (sid_tt, sessionid_ss)."
+        );
       }
 
       // ── Dismiss any popups/overlays ──
