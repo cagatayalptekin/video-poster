@@ -344,13 +344,24 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         });
         await humanDelay(2000, 4000);
 
-        // Handle cookie consent banner if present
-        // TODO: Selector may change — Instagram's cookie banner varies by region
-        const cookieBtn = await page.$('button:has-text("Allow All Cookies"), button:has-text("Allow essential and optional cookies"), button:has-text("Accept All"), button:has-text("Accept")');
-        if (cookieBtn) {
-          await cookieBtn.click();
-          await humanDelay(1000, 2000);
-          console.log("[InstagramPlaywright] Dismissed cookie consent");
+        // Handle cookie consent banner if present — try multiple times
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const cookieBtn = await page.$([
+            'button:has-text("Allow All Cookies")',
+            'button:has-text("Allow essential and optional cookies")',
+            'button:has-text("Accept All")',
+            'button:has-text("Accept")',
+            'button:has-text("Kabul Et")',
+            '[data-cookiebanner="accept_button"]',
+            'button[class*="cookie"]',
+          ].join(", "));
+          if (cookieBtn) {
+            await cookieBtn.click();
+            await humanDelay(1500, 2500);
+            console.log("[InstagramPlaywright] Dismissed cookie consent");
+            break;
+          }
+          await humanDelay(1000, 1500);
         }
 
         // ──────────────────────────────────────────────
@@ -358,14 +369,47 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         // ──────────────────────────────────────────────
         currentStep = "enter-credentials";
         console.log("[InstagramPlaywright] Entering credentials...");
+        console.log(`[InstagramPlaywright] Current URL: ${page.url()}`);
+        await saveDebugScreenshot(page, "before-login-form");
 
-        // Wait for login form
-        // TODO: Selector may change — these are the standard Instagram login form selectors
-        await waitForSelector(page, 'input[name="username"]', { timeout: 20000 });
-
-        await humanType(page, 'input[name="username"]', username);
+        // Wait for login form — try multiple selectors
+        const usernameSelectors = [
+          'input[name="username"]',
+          'input[aria-label="Phone number, username, or email"]',
+          'input[aria-label*="username"]',
+          'input[autocomplete="username"]',
+          'input[type="text"]',
+        ];
+        let usernameFound = false;
+        for (const sel of usernameSelectors) {
+          try {
+            await page.waitForSelector(sel, { timeout: 8000, state: "visible" });
+            console.log(`[InstagramPlaywright] Found username input via: ${sel}`);
+            usernameFound = true;
+            // use this selector for typing
+            await humanType(page, sel, username);
+            break;
+          } catch {
+            // try next
+          }
+        }
+        if (!usernameFound) {
+          await saveDebugScreenshot(page, "no-username-input");
+          throw new Error("Could not find username input on Instagram login page");
+        }
         await humanDelay(300, 800);
-        await humanType(page, 'input[name="password"]', password);
+
+        // Password
+        const passwordSelectors = ['input[name="password"]', 'input[type="password"]', 'input[aria-label*="password"]', 'input[aria-label*="Password"]'];
+        for (const sel of passwordSelectors) {
+          try {
+            await page.waitForSelector(sel, { timeout: 5000, state: "visible" });
+            await humanType(page, sel, password);
+            break;
+          } catch {
+            // try next
+          }
+        }
         await humanDelay(500, 1500);
 
         // Click login button
