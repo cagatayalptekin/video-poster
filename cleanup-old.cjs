@@ -4,20 +4,21 @@ const p = new PrismaClient({
 });
 
 async function main() {
-  // Mark the old video with missing file as failed permanently
-  const oldVideo = await p.videoQueueItem.findFirst({
-    where: { storedFilename: "56d4dc87-5333-42c4-b4cc-8238a999f5f0.mp4" },
+  // Mark all non-completed videos as failed so we can start fresh
+  const items = await p.videoQueueItem.findMany({
+    where: { status: { not: "completed" } },
+    include: { targets: true },
   });
-  if (oldVideo) {
+  for (const item of items) {
     await p.videoQueueItem.update({
-      where: { id: oldVideo.id },
-      data: { status: "failed", errorMessage: "File lost during redeployment" },
+      where: { id: item.id },
+      data: { status: "failed", errorMessage: "Cleaned up for fresh retry" },
     });
     await p.videoPlatformTarget.updateMany({
-      where: { videoQueueItemId: oldVideo.id },
-      data: { status: "failed", errorMessage: "File lost during redeployment" },
+      where: { videoQueueItemId: item.id },
+      data: { status: "failed", errorMessage: "Cleaned up for fresh retry" },
     });
-    console.log(`Marked old video ${oldVideo.id} as permanently failed`);
+    console.log(`Marked ${item.id} (${item.originalFilename}) as failed`);
   }
 }
 

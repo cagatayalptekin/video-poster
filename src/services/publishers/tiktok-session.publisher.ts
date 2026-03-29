@@ -136,13 +136,27 @@ export class TikTokSessionPublisher implements PlatformPublisher {
           "--disable-infobars",
           "--window-size=1280,900",
           "--lang=en-US,en",
+          // Memory optimization flags for constrained environments
+          "--disable-gpu",
+          "--disable-software-rasterizer",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--disable-default-apps",
+          "--disable-sync",
+          "--disable-translate",
+          "--no-first-run",
+          "--disable-background-timer-throttling",
+          "--disable-renderer-backgrounding",
+          "--disable-backgrounding-occluded-windows",
+          "--js-flags=--max-old-space-size=256",
+          "--single-process",
         ],
       });
 
       context = await browser.newContext({
         userAgent:
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        viewport: { width: 1280, height: 900 },
+        viewport: { width: 1024, height: 768 },
         locale: "en-US",
       });
 
@@ -150,6 +164,13 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       await context.addInitScript(() => {
         Object.defineProperty(navigator, "webdriver", { get: () => false });
       });
+
+      // Block heavy resources to save memory (images, fonts, media previews)
+      await context.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,otf}", (route) =>
+        route.abort()
+      );
+      await context.route("**/analytics/**", (route) => route.abort());
+      await context.route("**/sentry/**", (route) => route.abort());
 
       // ── Set session cookies ──
       currentStep = "set-cookies";
