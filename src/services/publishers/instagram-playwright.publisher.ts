@@ -273,6 +273,10 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
           "--disable-blink-features=AutomationControlled",
           "--no-sandbox",
           "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-infobars",
+          "--window-size=1280,900",
+          "--lang=en-US,en",
         ],
       });
 
@@ -290,9 +294,19 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         context = await browser.newContext({
           viewport: { width: 1280, height: 900 },
           userAgent:
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
           locale: "en-US",
           storageState: SESSION_FILE,
+          permissions: ["notifications"],
+          extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
+        });
+
+        await context.addInitScript(() => {
+          Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+          Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+          Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+          // @ts-expect-error - add chrome runtime for detection avoidance
+          window.chrome = { runtime: {} };
         });
 
         page = await context.newPage();
@@ -325,8 +339,18 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         context = await browser.newContext({
           viewport: { width: 1280, height: 900 },
           userAgent:
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
           locale: "en-US",
+          permissions: ["notifications"],
+          extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
+        });
+
+        await context.addInitScript(() => {
+          Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+          Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+          Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+          // @ts-expect-error - add chrome runtime for detection avoidance
+          window.chrome = { runtime: {} };
         });
 
         page = await context.newPage();
@@ -339,10 +363,10 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         currentStep = "navigate-login";
         console.log("[InstagramPlaywright] Navigating to Instagram login...");
         await page.goto("https://www.instagram.com/accounts/login/", {
-          waitUntil: "domcontentloaded",
-          timeout: 30000,
+          waitUntil: "load",
+          timeout: 45000,
         });
-        await humanDelay(2000, 4000);
+        await humanDelay(3000, 5000);
 
         // Log page state after initial load
         console.log(`[InstagramPlaywright] Page URL after load: ${page.url()}`);
@@ -410,17 +434,22 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
             const pageTitle = await page.title();
             const pageUrl = page.url();
             const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 800) ?? "(no body)");
+            const bodyHtml = await page.evaluate(() => document.body?.innerHTML?.substring(0, 800) ?? "(no html)");
             const allInputs = await page.evaluate(() =>
               Array.from(document.querySelectorAll("input")).map((el) => ({
                 type: (el as HTMLInputElement).type,
                 name: (el as HTMLInputElement).name,
                 placeholder: (el as HTMLInputElement).placeholder,
                 ariaLabel: el.getAttribute("aria-label"),
+                visible: (el as HTMLElement).offsetParent !== null,
               }))
             );
+            const webdriverVal = await page.evaluate(() => (navigator as Navigator & {webdriver?: unknown}).webdriver);
             console.log(`[InstagramPlaywright] Page title: "${pageTitle}"`);
             console.log(`[InstagramPlaywright] Page URL: ${pageUrl}`);
+            console.log(`[InstagramPlaywright] navigator.webdriver: ${webdriverVal}`);
             console.log(`[InstagramPlaywright] Body text: ${bodyText}`);
+            console.log(`[InstagramPlaywright] Body HTML: ${bodyHtml}`);
             console.log(`[InstagramPlaywright] Input fields found: ${JSON.stringify(allInputs)}`);
           } catch (diagErr) {
             console.warn(`[InstagramPlaywright] Diagnostic logging failed: ${diagErr}`);
