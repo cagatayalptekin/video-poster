@@ -385,10 +385,22 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
           console.log(`[InstagramPlaywright] Homepage body sample: ${homeHtml}`);
         } catch { /* ignore */ }
 
+        // Log all visible links and buttons on homepage for debugging
+        try {
+          const homepageLinks = await page.evaluate(() =>
+            Array.from(document.querySelectorAll("a, button, [role='button']"))
+              .filter((el) => (el as HTMLElement).offsetParent !== null)
+              .map((el) => ({ tag: el.tagName, text: el.textContent?.trim().substring(0, 40), href: (el as HTMLAnchorElement).href || null }))
+              .slice(0, 20)
+          );
+          console.log(`[InstagramPlaywright] Homepage links/buttons: ${JSON.stringify(homepageLinks)}`);
+        } catch { /* ignore */ }
+
         // Try clicking the "Log in" link/button on the homepage instead of hard-navigating to login URL
         let navigatedToLogin = false;
         const loginLinkSelectors = [
           'a[href="/accounts/login/"]',
+          'a[href*="accounts/login"]',
           'a:has-text("Log in")',
           'button:has-text("Log in")',
           '[role="button"]:has-text("Log in")',
@@ -398,12 +410,22 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
           try {
             const el = await page.$(sel);
             if (el) {
-              console.log(`[InstagramPlaywright] Clicking homepage login link via: ${sel}`);
+              const elText = await el.textContent();
+              const elHref = await el.getAttribute("href");
+              console.log(`[InstagramPlaywright] Found login element via ${sel}: text="${elText?.trim()}", href="${elHref}"`);
               await el.click();
-              await page.waitForURL("**/accounts/login/**", { timeout: 15000 });
-              navigatedToLogin = true;
-              console.log(`[InstagramPlaywright] Navigated to login via click: ${page.url()}`);
-              break;
+              // Wait for either the URL to change OR a login input to appear
+              try {
+                await Promise.race([
+                  page.waitForURL("**/accounts/login/**", { timeout: 15000 }),
+                  page.waitForSelector('input[name="username"], input[type="text"]', { timeout: 15000, state: "visible" }),
+                ]);
+                navigatedToLogin = true;
+                console.log(`[InstagramPlaywright] Navigated to login via click: ${page.url()}`);
+                break;
+              } catch (navErr) {
+                console.log(`[InstagramPlaywright] Click on ${sel} didn't navigate to login: ${navErr}`);
+              }
             }
           } catch { /* try next */ }
         }
