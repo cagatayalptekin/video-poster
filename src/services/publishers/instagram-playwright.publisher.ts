@@ -145,7 +145,17 @@ async function humanDelay(minMs = 800, maxMs = 2500): Promise<void> {
  * Helper: type text with a human-like cadence.
  */
 async function humanType(page: Page, selector: string, text: string): Promise<void> {
-  await page.click(selector);
+  try {
+    await page.click(selector, { timeout: 5000 });
+  } catch {
+    // If regular click fails (element obscured), try force click via JS
+    console.log(`[InstagramPlaywright] Regular click failed on ${selector}, trying JS click`);
+    await page.evaluate((sel) => {
+      const el = document.querySelector(sel) as HTMLElement | null;
+      if (el) el.click();
+    }, selector);
+    await page.focus(selector);
+  }
   for (const char of text) {
     await page.keyboard.type(char, { delay: 30 + Math.random() * 80 });
   }
@@ -376,26 +386,49 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         } catch { /* ignore */ }
 
         // Handle cookie consent banner if present — try multiple times
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          // Log visible buttons on first two attempts for debugging
+          if (attempt < 2) {
+            try {
+              const buttonTexts = await page.evaluate(() =>
+                Array.from(document.querySelectorAll("button, [role='button']"))
+                  .filter((el) => (el as HTMLElement).offsetParent !== null)
+                  .map((el) => el.textContent?.trim().substring(0, 50))
+                  .filter(Boolean)
+              );
+              console.log(`[InstagramPlaywright] Visible buttons (attempt ${attempt}): ${JSON.stringify(buttonTexts)}`);
+            } catch { /* ignore */ }
+          }
+
           const cookieBtn = await page.$([
             'button:has-text("Allow All Cookies")',
             'button:has-text("Allow essential and optional cookies")',
             'button:has-text("Accept All")',
             'button:has-text("Accept")',
             'button:has-text("Kabul Et")',
+            'button:has-text("Decline Optional Cookies")',
+            'button:has-text("Decline")',
             '[data-cookiebanner="accept_button"]',
+            '[data-cookiebanner="decline_button"]',
             'button[class*="cookie"]',
           ].join(", "));
           if (cookieBtn) {
-            await cookieBtn.click();
-            await humanDelay(1500, 2500);
-            console.log("[InstagramPlaywright] Dismissed cookie consent");
+            const btnText = await cookieBtn.textContent();
+            console.log(`[InstagramPlaywright] Dismissing cookie consent: "${btnText?.trim()}"`);
+            try {
+              await cookieBtn.click({ timeout: 5000 });
+            } catch {
+              // If regular click fails, try JS click
+              await page.evaluate((el) => (el as HTMLElement).click(), cookieBtn);
+            }
+            await humanDelay(2000, 3000);
+            console.log("[InstagramPlaywright] Cookie consent dismissed");
             break;
           }
           if (attempt === 0) {
-            console.log("[InstagramPlaywright] No cookie consent button found, continuing...");
+            console.log("[InstagramPlaywright] No cookie consent button found yet, waiting...");
           }
-          await humanDelay(1000, 1500);
+          await humanDelay(1500, 2000);
         }
 
         // ──────────────────────────────────────────────
