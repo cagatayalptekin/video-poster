@@ -517,9 +517,61 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         }
         await humanDelay(500, 1500);
 
-        // Click login button
+        // Dismiss any cookie consent overlay that appeared during typing
+        try {
+          const overlayBtn = await page.$([
+            'button:has-text("Allow All Cookies")',
+            'button:has-text("Accept All")',
+            'button:has-text("Accept")',
+            'button:has-text("Kabul Et")',
+            'button:has-text("Decline")',
+            'button:has-text("Decline Optional Cookies")',
+          ].join(", "));
+          if (overlayBtn) {
+            const overlayText = await overlayBtn.textContent();
+            console.log(`[InstagramPlaywright] Cookie overlay appeared during typing: "${overlayText?.trim()}" — dismissing`);
+            try {
+              await overlayBtn.click({ timeout: 5000 });
+            } catch {
+              await page.evaluate((el) => (el as HTMLElement).click(), overlayBtn);
+            }
+            await humanDelay(1500, 2500);
+          }
+        } catch { /* ignore */ }
+
+        // Click login button - try multiple approaches
         // TODO: Selector may change — button text may be localized
-        await page.click('button[type="submit"]');
+        console.log("[InstagramPlaywright] Clicking login button...");
+        let submitClicked = false;
+        const submitSelectors = [
+          'button[type="submit"]',
+          'button:has-text("Log in")',
+          'button:has-text("Log In")',
+          'div[role="button"]:has-text("Log in")',
+        ];
+        for (const sel of submitSelectors) {
+          try {
+            const el = await page.$(sel);
+            if (el) {
+              try {
+                await el.click({ timeout: 5000 });
+              } catch {
+                // Fallback: JS click
+                console.log(`[InstagramPlaywright] Regular click blocked on submit, using JS click`);
+                await page.evaluate((e) => (e as HTMLElement).click(), el);
+              }
+              submitClicked = true;
+              console.log(`[InstagramPlaywright] Login submitted via: ${sel}`);
+              break;
+            }
+          } catch { /* try next */ }
+        }
+        if (!submitClicked) {
+          // Last resort: press Enter on the password field
+          console.log("[InstagramPlaywright] Submit button not found, pressing Enter");
+          await page.keyboard.press("Enter");
+          submitClicked = true;
+        }
         console.log("[InstagramPlaywright] Login submitted, waiting for response...");
 
         // Wait for navigation after login
