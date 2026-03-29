@@ -344,6 +344,13 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         });
         await humanDelay(2000, 4000);
 
+        // Log page state after initial load
+        console.log(`[InstagramPlaywright] Page URL after load: ${page.url()}`);
+        try {
+          const titleAfterLoad = await page.title();
+          console.log(`[InstagramPlaywright] Page title after load: "${titleAfterLoad}"`);
+        } catch { /* ignore */ }
+
         // Handle cookie consent banner if present — try multiple times
         for (let attempt = 0; attempt < 3; attempt++) {
           const cookieBtn = await page.$([
@@ -360,6 +367,9 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
             await humanDelay(1500, 2500);
             console.log("[InstagramPlaywright] Dismissed cookie consent");
             break;
+          }
+          if (attempt === 0) {
+            console.log("[InstagramPlaywright] No cookie consent button found, continuing...");
           }
           await humanDelay(1000, 1500);
         }
@@ -395,6 +405,26 @@ export class InstagramPlaywrightPublisher implements PlatformPublisher {
         }
         if (!usernameFound) {
           await saveDebugScreenshot(page, "no-username-input");
+          // Log page state for diagnosis
+          try {
+            const pageTitle = await page.title();
+            const pageUrl = page.url();
+            const bodyText = await page.evaluate(() => document.body?.innerText?.substring(0, 800) ?? "(no body)");
+            const allInputs = await page.evaluate(() =>
+              Array.from(document.querySelectorAll("input")).map((el) => ({
+                type: (el as HTMLInputElement).type,
+                name: (el as HTMLInputElement).name,
+                placeholder: (el as HTMLInputElement).placeholder,
+                ariaLabel: el.getAttribute("aria-label"),
+              }))
+            );
+            console.log(`[InstagramPlaywright] Page title: "${pageTitle}"`);
+            console.log(`[InstagramPlaywright] Page URL: ${pageUrl}`);
+            console.log(`[InstagramPlaywright] Body text: ${bodyText}`);
+            console.log(`[InstagramPlaywright] Input fields found: ${JSON.stringify(allInputs)}`);
+          } catch (diagErr) {
+            console.warn(`[InstagramPlaywright] Diagnostic logging failed: ${diagErr}`);
+          }
           throw new Error("Could not find username input on Instagram login page");
         }
         await humanDelay(300, 800);
