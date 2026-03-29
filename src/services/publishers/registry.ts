@@ -6,6 +6,7 @@ import { InstagramPlaywrightPublisher } from "./instagram-playwright.publisher";
 import { InstagramApiPublisher } from "./instagram-api.publisher";
 import { TikTokPublisher } from "./tiktok-publisher";
 import { TikTokApiPublisher } from "./tiktok-api.publisher";
+import { TikTokSessionPublisher } from "./tiktok-session.publisher";
 
 function createInstagramPublisher(): PlatformPublisher {
   const provider = process.env.INSTAGRAM_PROVIDER || "mock";
@@ -26,6 +27,10 @@ function createTikTokPublisher(): PlatformPublisher {
   if (provider === "official") {
     console.log("[Registry] Using official TikTok API publisher");
     return new TikTokApiPublisher();
+  }
+  if (provider === "session") {
+    console.log("[Registry] Using session-based TikTok publisher (Playwright)");
+    return new TikTokSessionPublisher();
   }
   console.log("[Registry] Using mock TikTok publisher");
   return new TikTokPublisher();
