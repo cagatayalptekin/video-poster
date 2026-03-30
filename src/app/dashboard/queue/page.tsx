@@ -222,7 +222,24 @@ export default function QueuePage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Target Accounts</label>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-gray-700">Target Accounts</label>
+                  {Object.keys(accountsByPlatform).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const allSelected: Record<string, string[]> = {};
+                        for (const [platform, accs] of Object.entries(accountsByPlatform)) {
+                          allSelected[platform] = accs.map((a) => a.id);
+                        }
+                        setSelectedAccounts(allSelected);
+                      }}
+                      className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                    >
+                      Tümünü Seç
+                    </button>
+                  )}
+                </div>
                 {Object.keys(accountsByPlatform).length === 0 ? (
                   <p className="text-sm text-gray-400">No active accounts. Add accounts first.</p>
                 ) : (
@@ -259,11 +276,19 @@ export default function QueuePage() {
         {items.length === 0 ? (
           <div className="bg-white rounded-lg shadow p-8 text-center text-gray-400">No videos in queue</div>
         ) : (
-          items.map((item) => (
+          items.map((item, idx) => {
+            const queuedItems = items.filter((i) => i.status === "queued");
+            const queuePos = item.status === "queued" ? queuedItems.indexOf(item) + 1 : null;
+            return (
             <div key={item.id} className="bg-white rounded-lg shadow p-4">
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-1">
+                    {queuePos && (
+                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold">
+                        {queuePos}
+                      </span>
+                    )}
                     <span className="font-medium text-gray-900">{item.originalFilename}</span>
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[item.status] || "bg-gray-100"}`}>
                       {item.status.replace("_", " ")}
@@ -316,7 +341,8 @@ export default function QueuePage() {
                 </div>
               )}
             </div>
-          ))
+          );
+          })
         )}
       </div>
     </div>
