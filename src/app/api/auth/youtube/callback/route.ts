@@ -54,7 +54,28 @@ export async function GET(request: NextRequest) {
     return NextResponse.redirect(appUrl("/dashboard/accounts?youtube_error=token_exchange_failed"));
   }
 
-  // Update the SocialAccount with tokens
+  // Fetch YouTube channel info to get real channel name
+  let channelTitle = "";
+  let channelHandle = "";
+  try {
+    const channelRes = await fetch(
+      "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
+      { headers: { Authorization: `Bearer ${tokens.accessToken}` } }
+    );
+    if (channelRes.ok) {
+      const channelData = await channelRes.json();
+      const ch = channelData.items?.[0]?.snippet;
+      if (ch) {
+        channelTitle = ch.title || "";
+        channelHandle = ch.customUrl || ch.title || "";
+        console.log(`[YouTubeOAuth] Channel: ${channelTitle} (${channelHandle})`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[YouTubeOAuth] Failed to fetch channel info: ${err}`);
+  }
+
+  // Update the SocialAccount with tokens and channel info
   try {
     const metadataObj: Record<string, unknown> = { scope: tokens.scope };
 
@@ -64,6 +85,8 @@ export async function GET(request: NextRequest) {
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         authType: "oauth",
+        ...(channelTitle && { accountName: channelTitle }),
+        ...(channelHandle && { username: channelHandle.replace(/^@/, "") }),
         metadata: JSON.stringify(metadataObj),
       },
     });
