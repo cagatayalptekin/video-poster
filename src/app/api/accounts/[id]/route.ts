@@ -14,6 +14,18 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     const body = await request.json();
     const { platform, accountName, username, isActive, authType, accessToken, refreshToken, metadata } = body;
 
+    // Merge new metadata with existing to preserve fields like sessionid
+    let mergedMetadata: string | null | undefined = undefined;
+    if (metadata !== undefined) {
+      if (metadata) {
+        const existing = await prisma.socialAccount.findUnique({ where: { id }, select: { metadata: true } });
+        const existingMeta = existing?.metadata ? JSON.parse(existing.metadata) : {};
+        mergedMetadata = JSON.stringify({ ...existingMeta, ...metadata });
+      } else {
+        mergedMetadata = null;
+      }
+    }
+
     const account = await prisma.socialAccount.update({
       where: { id },
       data: {
@@ -24,7 +36,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
         ...(authType && { authType }),
         ...(accessToken !== undefined && { accessToken: accessToken || null }),
         ...(refreshToken !== undefined && { refreshToken: refreshToken || null }),
-        ...(metadata !== undefined && { metadata: metadata ? JSON.stringify(metadata) : null }),
+        ...(mergedMetadata !== undefined && { metadata: mergedMetadata }),
       },
     });
 

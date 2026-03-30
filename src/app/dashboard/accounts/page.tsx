@@ -35,6 +35,8 @@ export default function AccountsPage() {
     authType: "manual",
     accessToken: "",
     refreshToken: "",
+    tiktokEmail: "",
+    tiktokPassword: "",
   });
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
@@ -67,12 +69,13 @@ export default function AccountsPage() {
 
   function openAdd() {
     setEditing(null);
-    setForm({ platform: "youtube", accountName: "", username: "", isActive: true, authType: "manual", accessToken: "", refreshToken: "" });
+    setForm({ platform: "youtube", accountName: "", username: "", isActive: true, authType: "manual", accessToken: "", refreshToken: "", tiktokEmail: "", tiktokPassword: "" });
     setShowForm(true);
   }
 
   function openEdit(account: SocialAccount) {
     setEditing(account);
+    const meta = account.metadata ? JSON.parse(account.metadata) : {};
     setForm({
       platform: account.platform,
       accountName: account.accountName,
@@ -81,6 +84,8 @@ export default function AccountsPage() {
       authType: account.authType,
       accessToken: account.accessToken || "",
       refreshToken: account.refreshToken || "",
+      tiktokEmail: meta.tiktokEmail || "",
+      tiktokPassword: meta.tiktokPassword || "",
     });
     setShowForm(true);
   }
@@ -88,12 +93,29 @@ export default function AccountsPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     try {
+      if (form.platform === "tiktok" && !form.accessToken) {
+        setToast({ message: "TikTok hesabı için session ID gerekli", type: "error" });
+        return;
+      }
       const url = editing ? `/api/accounts/${editing.id}` : "/api/accounts";
       const method = editing ? "PUT" : "POST";
+      // Build metadata with TikTok credentials if provided
+      const metadata: Record<string, string> = {};
+      if (editing?.metadata) {
+        try { Object.assign(metadata, JSON.parse(editing.metadata)); } catch { /* ignore */ }
+      }
+      if (form.tiktokEmail) metadata.tiktokEmail = form.tiktokEmail;
+      else delete metadata.tiktokEmail;
+      if (form.tiktokPassword) metadata.tiktokPassword = form.tiktokPassword;
+      else delete metadata.tiktokPassword;
+
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+        }),
       });
       if (res.ok) {
         setToast({ message: editing ? "Account updated" : "Account added", type: "success" });
@@ -209,16 +231,36 @@ export default function AccountsPage() {
                 <input type="checkbox" id="isActive" checked={form.isActive} onChange={(e) => setForm({ ...form, isActive: e.target.checked })} />
                 <label htmlFor="isActive" className="text-sm text-gray-700">Active</label>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Access Token</label>
-                <input type="password" value={form.accessToken} onChange={(e) => setForm({ ...form, accessToken: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900" placeholder="Optional - for API integration" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Refresh Token</label>
-                <input type="password" value={form.refreshToken} onChange={(e) => setForm({ ...form, refreshToken: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900" placeholder="Optional" />
-              </div>
+              {form.platform === "tiktok" ? (
+                <>
+                  <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 space-y-1">
+                    <p><strong>Session ID nasıl alınır?</strong></p>
+                    <p>1. Chrome&apos;da <strong>yeni bir profil</strong> aç (sağ üst köşe → Profil ekle)</p>
+                    <p>2. O profilde <strong>tiktok.com</strong>&apos;a giriş yap</p>
+                    <p>3. F12 → Application → Cookies → tiktok.com → <strong>sessionid</strong> değerini kopyala</p>
+                    <p className="text-amber-700">Her hesap için farklı Chrome profili kullan — logout gerekmez.</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Session ID <span className="text-red-500">*</span></label>
+                    <input type="password" value={form.accessToken} onChange={(e) => setForm({ ...form, accessToken: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900" placeholder="tiktok.com cookie → sessionid" />
+                    <p className="text-xs text-gray-400 mt-1">Her hesabın session ID&apos;si DB&apos;de ayrı saklanır, birbirini etkilemez.</p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Access Token</label>
+                    <input type="password" value={form.accessToken} onChange={(e) => setForm({ ...form, accessToken: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900" placeholder="Optional - for API integration" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Refresh Token</label>
+                    <input type="password" value={form.refreshToken} onChange={(e) => setForm({ ...form, refreshToken: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md text-gray-900" placeholder="Optional" />
+                  </div>
+                </>
+              )}
               <div className="flex justify-end gap-2 pt-2">
                 <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
                 <button type="submit" className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">

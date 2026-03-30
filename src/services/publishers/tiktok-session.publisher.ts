@@ -1,5 +1,6 @@
 import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { PlatformPublisher, PublishInput, PublishResult } from "./types";
+import prisma from "@/lib/prisma";
 import path from "path";
 import fs from "fs";
 
@@ -104,17 +105,22 @@ export class TikTokSessionPublisher implements PlatformPublisher {
     }
 
     const cookies = parseSessionCookies(input.accessToken, input.metadata);
-    if (!cookies) {
+    const hasCredentials = !!(input.metadata?.tiktokEmail && input.metadata?.tiktokPassword);
+    if (!cookies && !hasCredentials) {
       return this.fail(
-        "TikTok session cookie not found. Set the sessionid as the account's accessToken. " +
-          "Get it from your browser: DevTools → Application → Cookies → tiktok.com → sessionid"
+        "TikTok session cookie not found and no login credentials configured. " +
+          "Set tiktokEmail/tiktokPassword in account metadata, or provide a sessionid."
       );
     }
 
     console.log(`[TikTokSession] Starting upload for account ${input.accountId}`);
     console.log(`[TikTokSession] Video: ${input.filePath} (${(fileStat.size / 1024 / 1024).toFixed(1)} MB)`);
-    console.log(`[TikTokSession] Session ID: ${cookies.sessionId.substring(0, 8)}...`);
-    console.log(`[TikTokSession] Datacenter: ${cookies.dcId}`);
+    if (cookies) {
+      console.log(`[TikTokSession] Session ID: ${cookies.sessionId.substring(0, 8)}...`);
+      console.log(`[TikTokSession] Datacenter: ${cookies.dcId}`);
+    } else {
+      console.log("[TikTokSession] No session cookie — will try credential login");
+    }
 
     let browser: Browser | null = null;
     let context: BrowserContext | null = null;
@@ -172,28 +178,29 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       await context.route("**/analytics/**", (route) => route.abort());
       await context.route("**/sentry/**", (route) => route.abort());
 
-      // ── Set session cookies ──
+      // ── Set session cookies (if available) ──
       currentStep = "set-cookies";
-      console.log("[TikTokSession] Setting session cookies...");
+      if (cookies) {
+        console.log("[TikTokSession] Setting session cookies...");
 
-      // Set the full set of session cookies TikTok expects
-      const cookieBase = {
-        domain: ".tiktok.com" as const,
-        path: "/",
-        secure: true,
-        sameSite: "None" as const,
-      };
+        const cookieBase = {
+          domain: ".tiktok.com" as const,
+          path: "/",
+          secure: true,
+          sameSite: "None" as const,
+        };
 
-      await context.addCookies([
-        { ...cookieBase, name: "sessionid", value: cookies.sessionId, httpOnly: true },
-        { ...cookieBase, name: "sessionid_ss", value: cookies.sessionId, httpOnly: true },
-        { ...cookieBase, name: "sid_tt", value: cookies.sessionId, httpOnly: true },
-        { ...cookieBase, name: "sid_guard", value: `${cookies.sessionId}|${Math.floor(Date.now() / 1000)}|5184000|${Math.floor(Date.now() / 1000) + 5184000}`, httpOnly: true },
-        { ...cookieBase, name: "tt-target-idc", value: cookies.dcId, httpOnly: false },
-        { ...cookieBase, name: "tt_csrf_token", value: this.generateCsrfToken(), httpOnly: false },
-        { ...cookieBase, name: "tt-target-idc-sign", value: this.generateCsrfToken(), httpOnly: false },
-        { ...cookieBase, name: "passport_csrf_token", value: this.generateCsrfToken(), httpOnly: false },
-      ]);
+        await context.addCookies([
+          { ...cookieBase, name: "sessionid", value: cookies.sessionId, httpOnly: true },
+          { ...cookieBase, name: "sessionid_ss", value: cookies.sessionId, httpOnly: true },
+          { ...cookieBase, name: "sid_tt", value: cookies.sessionId, httpOnly: true },
+          { ...cookieBase, name: "sid_guard", value: `${cookies.sessionId}|${Math.floor(Date.now() / 1000)}|5184000|${Math.floor(Date.now() / 1000) + 5184000}`, httpOnly: true },
+          { ...cookieBase, name: "tt-target-idc", value: cookies.dcId, httpOnly: false },
+          { ...cookieBase, name: "tt_csrf_token", value: this.generateCsrfToken(), httpOnly: false },
+          { ...cookieBase, name: "tt-target-idc-sign", value: this.generateCsrfToken(), httpOnly: false },
+          { ...cookieBase, name: "passport_csrf_token", value: this.generateCsrfToken(), httpOnly: false },
+        ]);
+      }
 
       page = await context.newPage();
 
@@ -210,13 +217,33 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       await saveDebugScreenshot(page, "01-homepage");
 
       // Check if we're logged in by looking for upload/profile elements
-      const loggedIn = await this.checkLoggedIn(page);
+      let loggedIn = await this.checkLoggedIn(page);
       if (!loggedIn) {
         await saveDebugScreenshot(page, "01b-not-logged-in");
-        return this.fail(
-          "TikTok session cookie is invalid or expired. " +
-            "Please get a fresh sessionid from your browser and update the account."
-        );
+
+        // Try auto-login with email/password if credentials are available
+        const email = input.metadata?.tiktokEmail as string | undefined;
+        const password = input.metadata?.tiktokPassword as string | undefined;
+        if (email && password) {
+          console.log("[TikTokSession] Session expired — attempting auto-login with credentials...");
+          const loginOk = await this.loginWithCredentials(page, context, email, password);
+          if (loginOk) {
+            // Extract the fresh sessionid from browser cookies and persist it
+            const newSessionId = await this.extractSessionId(context);
+            if (newSessionId) {
+              await this.saveSessionToDb(input.accountId, newSessionId);
+            }
+            loggedIn = true;
+          }
+        }
+
+        if (!loggedIn) {
+          return this.fail(
+            "TikTok session ID geçersiz veya süresi dolmuş. " +
+              "Chrome'da tiktok.com'a giriş yap → F12 → Application → Cookies → sessionid değerini kopyala → " +
+              "Dashboard'da hesabı düzenleyerek yeni session ID'yi gir."
+          );
+        }
       }
       console.log("[TikTokSession] Session valid - user is logged in");
 
@@ -369,6 +396,12 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       await this.waitForVideoProcessing(page);
       await saveDebugScreenshot(page, "05-video-processed");
 
+      // ── Dismiss overlays that appeared after upload ──
+      currentStep = "dismiss-post-upload-popups";
+      await this.dismissPopups(page);
+      await this.dismissJoyrideOverlay(page);
+      await humanDelay(500, 1000);
+
       // ── Fill in caption/title ──
       currentStep = "fill-caption";
       const caption = this.buildCaption(input.caption, input.hashtags);
@@ -377,6 +410,12 @@ export class TikTokSessionPublisher implements PlatformPublisher {
       await this.fillCaption(page, caption);
       await humanDelay(1000, 2000);
       await saveDebugScreenshot(page, "06-caption-filled");
+
+      // ── Dismiss any last popups before clicking Post ──
+      currentStep = "dismiss-popups-pre-post";
+      await this.dismissPopups(page);
+      await this.dismissJoyrideOverlay(page);
+      await humanDelay(500, 1000);
 
       // ── Click Post/Publish button ──
       currentStep = "publish";
@@ -439,6 +478,132 @@ export class TikTokSessionPublisher implements PlatformPublisher {
     return token;
   }
 
+  // ─── Auto-login helpers ─────────────────────────────────
+
+  private async loginWithCredentials(
+    page: Page,
+    context: BrowserContext,
+    email: string,
+    password: string
+  ): Promise<boolean> {
+    try {
+      console.log("[TikTokSession] Navigating to TikTok login page...");
+      await page.goto("https://www.tiktok.com/login/phone-or-email/email", {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
+      });
+      await humanDelay(3000, 5000);
+      await this.dismissPopups(page);
+
+      // Fill email
+      const emailInput = page.locator('input[name="username"], input[type="text"][placeholder*="email" i], input[type="text"][placeholder*="Email" i], input[type="text"][placeholder*="phone" i]').first();
+      if ((await emailInput.count()) === 0) {
+        console.warn("[TikTokSession] Could not find email input on login page");
+        await saveDebugScreenshot(page, "login-no-email-input");
+        return false;
+      }
+      await emailInput.click();
+      await humanDelay(300, 600);
+      await emailInput.fill(email);
+      await humanDelay(500, 1000);
+
+      // Fill password
+      const passwordInput = page.locator('input[type="password"]').first();
+      if ((await passwordInput.count()) === 0) {
+        console.warn("[TikTokSession] Could not find password input on login page");
+        await saveDebugScreenshot(page, "login-no-password-input");
+        return false;
+      }
+      await passwordInput.click();
+      await humanDelay(300, 600);
+      await passwordInput.fill(password);
+      await humanDelay(500, 1000);
+
+      await saveDebugScreenshot(page, "login-credentials-filled");
+
+      // Click login button
+      const loginBtn = page.locator('button[type="submit"], button:text-is("Log in")').first();
+      await loginBtn.click();
+      console.log("[TikTokSession] Clicked login button, waiting for navigation...");
+
+      // Wait for navigation or CAPTCHA/2FA (up to 60 seconds)
+      // TikTok may show a puzzle CAPTCHA here — in non-headless mode the user can solve it
+      const maxLoginWaitMs = 60000;
+      const startTime = Date.now();
+
+      while (Date.now() - startTime < maxLoginWaitMs) {
+        await humanDelay(3000, 5000);
+        const url = page.url();
+
+        // Successfully logged in — redirected away from login page
+        if (!url.includes("/login")) {
+          console.log(`[TikTokSession] Login successful! Redirected to: ${url}`);
+          await saveDebugScreenshot(page, "login-success");
+          return true;
+        }
+
+        // Check for error messages
+        const errorText = await page
+          .locator('[class*="error" i], [class*="Error"]')
+          .first()
+          .textContent()
+          .catch(() => null);
+        if (errorText && errorText.length > 5 && (errorText.toLowerCase().includes("incorrect") || errorText.toLowerCase().includes("wrong"))) {
+          console.error(`[TikTokSession] Login error: ${errorText.trim()}`);
+          await saveDebugScreenshot(page, "login-error");
+          return false;
+        }
+
+        // Still on login page — likely CAPTCHA or verification
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[TikTokSession] Waiting for login (${elapsed}s) — CAPTCHA/verification may be required...`);
+      }
+
+      console.warn("[TikTokSession] Login timed out after 60s");
+      await saveDebugScreenshot(page, "login-timeout");
+      return false;
+    } catch (err) {
+      console.error(`[TikTokSession] Login error: ${err}`);
+      await saveDebugScreenshot(page, "login-exception");
+      return false;
+    }
+  }
+
+  private async extractSessionId(context: BrowserContext): Promise<string | null> {
+    try {
+      const cookies = await context.cookies("https://www.tiktok.com");
+      const sessionCookie = cookies.find((c) => c.name === "sessionid");
+      if (sessionCookie?.value) {
+        console.log(`[TikTokSession] Extracted new sessionid: ${sessionCookie.value.substring(0, 12)}...`);
+        return sessionCookie.value;
+      }
+    } catch (err) {
+      console.warn(`[TikTokSession] Failed to extract sessionid: ${err}`);
+    }
+    return null;
+  }
+
+  private async saveSessionToDb(accountId: string, newSessionId: string): Promise<void> {
+    try {
+      const account = await prisma.socialAccount.findUnique({ where: { id: accountId } });
+      if (!account) return;
+
+      const metadata = JSON.parse(account.metadata || "{}");
+      metadata.sessionid = newSessionId;
+
+      await prisma.socialAccount.update({
+        where: { id: accountId },
+        data: {
+          accessToken: newSessionId,
+          metadata: JSON.stringify(metadata),
+        },
+      });
+      console.log(`[TikTokSession] Saved new sessionid to DB for account ${accountId}`);
+    } catch (err) {
+      console.warn(`[TikTokSession] Failed to save sessionid to DB: ${err}`);
+    }
+  }
+
   private async checkLoggedIn(page: Page): Promise<boolean> {
     try {
       // Look for elements that only appear when logged in
@@ -486,24 +651,54 @@ export class TikTokSessionPublisher implements PlatformPublisher {
   private async dismissPopups(page: Page): Promise<void> {
     // Dismiss cookie consent banners
     const cookieSelectors = [
+      'button:has-text("Allow all")',
       'button:has-text("Accept all")',
       'button:has-text("Accept All")',
       'button:has-text("Allow all cookies")',
+      'button:has-text("Decline optional cookies")',
       '[data-e2e="cookie-banner-accept"]',
     ];
 
     for (const selector of cookieSelectors) {
       try {
         const btn = await page.$(selector);
-        if (btn) {
+        if (btn && (await btn.isVisible())) {
           await btn.click();
           await humanDelay(500, 1000);
-          console.log("[TikTokSession] Dismissed cookie banner");
+          console.log(`[TikTokSession] Dismissed cookie banner via: ${selector}`);
           break;
         }
       } catch {
         // Continue
       }
+    }
+
+    // Dismiss "Turn on automatic content checks?" modal - cancel it
+    // NOTE: only dismiss if the dedicated "Turn on" / "Cancel" belong to this modal,
+    // NOT the "Continue to post?" modal (that one is handled separately via handleContinueToPostModal)
+    try {
+      const pageContent = await page.content();
+      const hasTurnOn = await page.$('button:text-is("Turn on")');
+      if (hasTurnOn && (await hasTurnOn.isVisible().catch(() => false)) &&
+          (pageContent.includes("automatic content checks") || pageContent.includes("Turn on automatic"))) {
+        await hasTurnOn.click();
+        await humanDelay(500, 1000);
+        console.log("[TikTokSession] Dismissed content checks modal via: Turn on");
+      }
+    } catch {
+      // Continue
+    }
+
+    // Dismiss "New editing features added" / "Got it" popup
+    try {
+      const gotItBtn = await page.$('button:has-text("Got it")');
+      if (gotItBtn && (await gotItBtn.isVisible())) {
+        await gotItBtn.click();
+        await humanDelay(500, 1000);
+        console.log("[TikTokSession] Dismissed 'Got it' popup");
+      }
+    } catch {
+      // Continue
     }
 
     // Dismiss any other modals
@@ -527,6 +722,44 @@ export class TikTokSessionPublisher implements PlatformPublisher {
     }
   }
 
+  private async dismissJoyrideOverlay(page: Page): Promise<void> {
+    // Dismiss react-joyride tutorial overlay that blocks all interactions
+    try {
+      const joyrideOverlay = await page.$('[data-test-id="overlay"], .react-joyride__overlay');
+      if (joyrideOverlay) {
+        // Click "Got it" or any joyride close button
+        const joyrideButtons = [
+          'button:has-text("Got it")',
+          'button:has-text("Skip")',
+          'button:has-text("Next")',
+          'button:has-text("Close")',
+          '[data-test-id="button-primary"]',
+        ];
+
+        for (const selector of joyrideButtons) {
+          const btn = await page.$(selector);
+          if (btn && (await btn.isVisible().catch(() => false))) {
+            await btn.click({ force: true });
+            await humanDelay(500, 1000);
+            console.log(`[TikTokSession] Dismissed joyride overlay via: ${selector}`);
+            return;
+          }
+        }
+
+        // If no button found, try to remove the overlay via JS
+        await page.evaluate(() => {
+          const portal = document.getElementById("react-joyride-portal");
+          if (portal) portal.remove();
+          const overlays = document.querySelectorAll(".react-joyride__overlay, [data-test-id='overlay']");
+          overlays.forEach((el) => el.remove());
+        });
+        console.log("[TikTokSession] Removed joyride overlay via JS");
+      }
+    } catch (err) {
+      console.log(`[TikTokSession] Joyride dismissal: ${err}`);
+    }
+  }
+
   private async waitForVideoProcessing(page: Page): Promise<void> {
     // Wait for upload progress to complete
     // TikTok shows a progress bar; once complete, the Post button becomes enabled
@@ -541,9 +774,9 @@ export class TikTokSessionPublisher implements PlatformPublisher {
     while (Date.now() - startTime < maxWaitMs) {
       // Check for the Post button specifically - TikTok Studio shows it once upload completes
       const postBtnSelectors = [
-        'button:has-text("Post")',
-        'button:has-text("Publish")',
-        'div[role="button"]:has-text("Post")',
+        'button:text-is("Post")',
+        'button:text-is("Publish")',
+        'div[role="button"]:text-is("Post")',
         '[data-e2e="post-button"]',
       ];
 
@@ -630,35 +863,67 @@ export class TikTokSessionPublisher implements PlatformPublisher {
   }
 
   private async fillCaption(page: Page, caption: string): Promise<void> {
-    // TikTok uses a contenteditable div for the caption
+    // TikTok Studio uses a contenteditable div for the caption/description.
+    // Even if caption is empty, we need to clear the auto-filled filename.
     const captionSelectors = [
       '[data-e2e="caption-input"]',
-      '[contenteditable="true"]',
+      // TikTok Studio's editor area - the contenteditable near the description label
+      'div[class*="editor"] [contenteditable="true"]',
+      'div[class*="caption"] [contenteditable="true"]',
       'div[class*="DivEditorContainer"] [contenteditable]',
-      'div[class*="caption"] [contenteditable]',
+      '[contenteditable="true"]',
       // Fallback: any editable area
       '[role="textbox"]',
       '.public-DraftEditor-content',
+      // More generic approach - find by structure near the "Description" label
+      'div.notranslate[contenteditable="true"]',
     ];
 
     for (const selector of captionSelectors) {
       try {
         const el = await page.$(selector);
         if (el && (await el.isVisible())) {
-          // Clear existing text first
+          // Clear existing text first (removes the auto-filled UUID filename)
           await el.click();
+          await humanDelay(300, 500);
           await page.keyboard.press("Control+A");
           await page.keyboard.press("Backspace");
           await humanDelay(300, 600);
 
-          // Type the caption
-          await page.keyboard.type(caption, { delay: 20 + Math.random() * 30 });
-          console.log(`[TikTokSession] Caption filled via: ${selector}`);
+          // Type the caption if provided
+          if (caption) {
+            await page.keyboard.type(caption, { delay: 20 + Math.random() * 30 });
+          }
+          console.log(`[TikTokSession] Caption ${caption ? "filled" : "cleared (auto-filename removed)"} via: ${selector}`);
           return;
         }
-      } catch {
-        // Try next selector
+      } catch (err) {
+        console.log(`[TikTokSession] Caption selector ${selector} failed: ${err}`);
       }
+    }
+
+    // Last resort: try to find any element showing the UUID-like filename and clear it
+    try {
+      const editables = await page.$$('[contenteditable="true"]');
+      console.log(`[TikTokSession] Found ${editables.length} contenteditable elements`);
+      for (const el of editables) {
+        const text = await el.textContent();
+        console.log(`[TikTokSession]   Editable content: "${text?.substring(0, 60)}"`);
+        // If it contains a UUID-like pattern (our stored filename), clear it
+        if (text && /[0-9a-f]{8}-[0-9a-f]{4}/.test(text)) {
+          await el.click();
+          await page.keyboard.press("Control+A");
+          await page.keyboard.press("Backspace");
+          await humanDelay(300, 600);
+          if (caption) {
+            await page.keyboard.type(caption, { delay: 20 + Math.random() * 30 });
+          }
+          console.log(`[TikTokSession] Cleared UUID filename from editable and ${caption ? "set caption" : "left empty"}`);
+          return;
+        }
+      }
+    } catch (err) {
+      console.log(`[TikTokSession] Last resort caption clear failed: ${err}`);
     }
 
     console.warn("[TikTokSession] Could not find caption input - proceeding without caption");
@@ -698,14 +963,14 @@ export class TikTokSessionPublisher implements PlatformPublisher {
 
     const postSelectors = [
       '[data-e2e="post-button"]',
-      'button:has-text("Post")',
-      'button:has-text("Publish")',
-      'button:has-text("Upload")',
+      // Use :text-is() for EXACT text match (not :has-text which also matches "Posts")
+      'button:text-is("Post")',
+      'button:text-is("Publish")',
       // TikTok Studio uses div-based buttons
-      'div[role="button"]:has-text("Post")',
-      'div[role="button"]:has-text("Publish")',
-      'div[class*="DivButton"]:has-text("Post")',
-      'button[class*="Button"]:has-text("Post")',
+      'div[role="button"]:text-is("Post")',
+      'div[role="button"]:text-is("Publish")',
+      'div[class*="DivButton"]:text-is("Post")',
+      'button[class*="Button"]:text-is("Post")',
       // Broader matches
       '*[class*="post-button"]',
       '*[class*="PostButton"]',
@@ -760,42 +1025,54 @@ export class TikTokSessionPublisher implements PlatformPublisher {
     return false;
   }
 
+  private async handleContinueToPostModal(page: Page): Promise<boolean> {
+    // "Continue to post?" appears when content checks are still running after clicking Post.
+    // We must click "Post now" (NOT Cancel) to actually submit the video.
+    // Returns true if the modal was found and "Post now" was clicked.
+    try {
+      // Use locator() for reliable text matching (handles div[role=button] too)
+      const postNowBtn = page.locator('button, [role="button"]').filter({ hasText: /^Post now$/i }).first();
+      if ((await postNowBtn.count()) > 0 && (await postNowBtn.isVisible().catch(() => false))) {
+        await postNowBtn.click({ force: true });
+        await humanDelay(2000, 3000);
+        console.log("[TikTokSession] Clicked 'Post now' on 'Continue to post?' modal");
+        return true;
+      }
+    } catch (err) {
+      console.log(`[TikTokSession] handleContinueToPostModal: ${err}`);
+    }
+    return false;
+  }
+
   private async checkPublishResult(
     page: Page
   ): Promise<{ success: boolean; videoId?: string; videoUrl?: string; error?: string }> {
-    // Wait for result - check for success or error over 30 seconds
-    const maxWaitMs = 30000;
+    // Wait for result - check for success or error over 60 seconds
+    const maxWaitMs = 60000;
     const pollInterval = 2000;
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitMs) {
-      // Check for success indicators
-      const successIndicators = [
-        'text="Your video has been uploaded"',
-        'text="Your video is being uploaded"',
-        'text="Video published"',
-        '[class*="success"]',
-        // Redirect to manage page or video page
-      ];
-
-      for (const selector of successIndicators) {
-        try {
-          const el = await page.$(selector);
-          if (el) {
-            console.log(`[TikTokSession] Success indicator found: ${selector}`);
-            return { success: true };
-          }
-        } catch {
-          // Continue
-        }
+      // Handle "Continue to post?" confirmation modal - click "Post now" first
+      // If clicked, skip all success checks this iteration (avoid false positive from Post/Discard
+      // buttons being hidden behind the modal overlay while we wait for TikTok to actually post)
+      const continueModalClicked = await this.handleContinueToPostModal(page).catch(() => false);
+      if (continueModalClicked) {
+        await new Promise((r) => setTimeout(r, pollInterval));
+        continue;
       }
 
-      // Check current URL for redirect to video page
+      // Dismiss other popups (cookie banners etc)
+      await this.dismissPopups(page).catch(() => {});
+
+      // Check current URL for redirect away from upload page
       const url = page.url();
-      if (url.includes("/video/") || url.includes("/manage/uploads")) {
-        // Try to extract video ID from URL
+
+      // Check for redirect to video page or manage page (strongest success signal)
+      if (url.includes("/video/") || url.includes("/manage/uploads") || url.includes("/tiktokstudio/content")) {
         const videoIdMatch = url.match(/\/video\/(\d+)/);
         const videoId = videoIdMatch?.[1];
+        console.log(`[TikTokSession] Redirected to: ${url}`);
         return {
           success: true,
           videoId,
@@ -803,30 +1080,84 @@ export class TikTokSessionPublisher implements PlatformPublisher {
         };
       }
 
-      // Check for error indicators
-      const pageContent = await page.content();
-      if (
-        pageContent.includes("failed") ||
-        pageContent.includes("error") ||
-        pageContent.includes("try again")
-      ) {
-        // Check if it's a real error message
-        const errorEls = await page.$$('[class*="error"], [class*="Error"]');
-        for (const el of errorEls) {
-          const text = await el.textContent();
-          if (text && text.length > 5 && text.length < 200) {
-            return { success: false, error: `TikTok error: ${text}` };
+      // Check for the actual post-success elements (NOT upload success)
+      // TikTok shows "Your video has been uploaded" or "Manage your posts" after posting
+      const successTexts = [
+        'text="Your video has been uploaded"',
+        'text="Your video is being uploaded"',
+        'text="Video published"',
+        'text="Manage your posts"',
+        'text="Upload another video"',
+      ];
+
+      for (const selector of successTexts) {
+        try {
+          const el = await page.$(selector);
+          if (el && (await el.isVisible().catch(() => false))) {
+            console.log(`[TikTokSession] Success text found: ${selector}`);
+            return { success: true };
           }
+        } catch {
+          // Continue
         }
       }
 
-      // If we see the upload page content has changed significantly (post was submitted)
-      // Accept it as success after a reasonable wait
-      if (Date.now() - startTime > 15000) {
-        // Check if the Post button is gone (indicating submission)
-        const postBtn = await page.$('[data-e2e="post-button"]');
-        if (!postBtn) {
-          console.log("[TikTokSession] Post button no longer visible - assuming success");
+      // Check for success class BUT only if the Post/Discard buttons are gone
+      // (otherwise [class*="success"] matches the upload progress indicator)
+      try {
+        const successEl = await page.$('[class*="success"]');
+        if (successEl && (await successEl.isVisible().catch(() => false))) {
+          const postBtn = await page.$('button:text-is("Post")');
+          const discardBtn = await page.$('button:text-is("Discard")');
+          const postGone = !postBtn || !(await postBtn.isVisible().catch(() => false));
+          const discardGone = !discardBtn || !(await discardBtn.isVisible().catch(() => false));
+          if (postGone && discardGone) {
+            // Guard: if "Continue to post?" modal is visible, it's a false positive
+            // (Post/Discard are hidden behind the modal overlay but video isn't posted yet)
+            const postNowVisible = await page
+              .locator('button, [role="button"]')
+              .filter({ hasText: /^Post now$/i })
+              .first()
+              .isVisible()
+              .catch(() => false);
+            if (postNowVisible) {
+              console.log("[TikTokSession] False success guard: 'Continue to post?' modal still visible, clicking Post now");
+              await page.locator('button, [role="button"]').filter({ hasText: /^Post now$/i }).first().click({ force: true }).catch(() => {});
+              await new Promise((r) => setTimeout(r, pollInterval));
+              continue;
+            }
+            console.log("[TikTokSession] Success indicator found and Post/Discard buttons gone");
+            return { success: true };
+          } else {
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            console.log(`[TikTokSession] Success class visible but Post/Discard still present (${elapsed}s) - waiting...`);
+          }
+        }
+      } catch {
+        // Continue
+      }
+
+      // Check for error messages on the upload form
+      try {
+        const errorEls = await page.$$('[class*="error"]:not([class*="success"]), [class*="Error"]:not([class*="Success"])');
+        for (const el of errorEls) {
+          if (await el.isVisible().catch(() => false)) {
+            const text = await el.textContent();
+            if (text && text.length > 5 && text.length < 200 && !text.includes("optional")) {
+              return { success: false, error: `TikTok error: ${text.trim()}` };
+            }
+          }
+        }
+      } catch {
+        // Continue
+      }
+
+      // After 30s, check if Post button is gone
+      if (Date.now() - startTime > 30000) {
+        const postBtn = await page.$('button:text-is("Post")');
+        const postVisible = postBtn ? await postBtn.isVisible().catch(() => false) : false;
+        if (!postVisible) {
+          console.log("[TikTokSession] Post button no longer visible after 30s - assuming success");
           return { success: true };
         }
       }
@@ -835,14 +1166,16 @@ export class TikTokSessionPublisher implements PlatformPublisher {
     }
 
     // Timeout - check final state
-    console.warn("[TikTokSession] Publish result check timed out");
+    console.warn("[TikTokSession] Publish result check timed out after 60s");
 
-    // If we're still on the upload page, it probably failed
-    if (page.url().includes("/upload")) {
-      return { success: false, error: "Publish timed out - still on upload page" };
+    // If we're still on the upload page with Post button visible, it failed
+    const postBtn = await page.$('button:text-is("Post")');
+    const stillHasPost = postBtn ? await postBtn.isVisible().catch(() => false) : false;
+    if (page.url().includes("/upload") && stillHasPost) {
+      return { success: false, error: "Publish timed out - Post button still visible on upload page" };
     }
 
-    // Otherwise assume success (page may have navigated)
+    // Otherwise assume success (page may have navigated or button gone)
     return { success: true };
   }
 }
