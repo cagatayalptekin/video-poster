@@ -3,6 +3,8 @@ import prisma from "@/lib/prisma";
 import { getSchedulerStatus } from "@/lib/scheduler";
 import { initializeApp } from "@/services/init";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   await initializeApp();
 

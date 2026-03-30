@@ -4,6 +4,8 @@ import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 
+export const dynamic = "force-dynamic";
+
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "./uploads";
 const MAX_FILE_SIZE = (Number(process.env.MAX_FILE_SIZE_MB) || 500) * 1024 * 1024;
 

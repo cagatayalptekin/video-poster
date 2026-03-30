@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const accounts = await prisma.socialAccount.findMany({ orderBy: { createdAt: "desc" } });
   return NextResponse.json(accounts);
